@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Managed usage events are fsynced to a durable spool (`RUSTACCIO_MANAGED_EVENT_SPOOL_DIR`, `RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES`) and retried with the same `event_id` until the control plane acknowledges them. A full spool drops the newest event and increments `rustaccio_events_dropped_total` instead of failing the npm operation.
+- Managed download and publish events now carry the optional transfer context (`registry_id`, `format`, `file`, `declared_bytes`, `status`, `range`, trusted edge `client_ip`, `user_agent`, `npm_command`, `npm_session`, `ci`, `host`, `request_id`). `client_ip` is taken from `Fly-Client-IP` or `CF-Connecting-IP`; client-supplied `X-Forwarded-For` is ignored.
+- Packument cache hits are aggregated per registry, credential, package and minute and reported as `kind: "metadata"` events (`count`, `bytes`, `not_modified`).
+- An authorize answer of `route: "upstream"` reverse-proxies the original request to the control-plane npm surface, preserving `Host` and `Authorization`. An absent or `hosted` route keeps the previous 404. Uplinks stay disabled in managed mode.
+- Fleet heartbeats advertise `events_v2` and `upstream_forward`.
 - Managed download events now carry the optional control-plane `credential_id` and resolved version, allowing customer-level delivery attribution by package version in redirect and proxy modes.
 
 ### Removed

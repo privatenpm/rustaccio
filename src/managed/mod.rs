@@ -14,6 +14,7 @@ pub mod dispatch;
 pub mod events;
 pub mod extract;
 pub mod fleet;
+mod spool;
 
 use crate::config::{Config, TarballStorageBackend};
 use crate::error::RegistryError;
@@ -71,8 +72,12 @@ pub struct ManagedConfig {
     pub max_metadata_bytes: usize,
     /// Presigned upload timeout.
     pub upload_timeout_ms: u64,
-    /// Event buffer capacity (drop-on-full).
-    pub event_queue_capacity: usize,
+    /// Directory pending usage-event batches are fsynced to. Distinct from
+    /// `spool_dir`, which holds publish tarball bytes and is swept on startup.
+    pub event_spool_dir: PathBuf,
+    /// Byte bound of the event spool. A new event that would exceed it is
+    /// dropped and counted in `rustaccio_events_dropped_total`.
+    pub event_spool_max_bytes: u64,
     /// Directory tarball payloads are spooled to between reserve and upload.
     pub spool_dir: PathBuf,
 }
@@ -133,6 +138,19 @@ impl ManagedConfig {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "rustaccio-data-plane".to_string());
 
+        let spool_dir = data_dir.join("managed-spool");
+        let event_spool_dir = std::env::var("RUSTACCIO_MANAGED_EVENT_SPOOL_DIR")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("managed-events"));
+        if event_spool_dir == spool_dir {
+            return Err(misconfigured(
+                "RUSTACCIO_MANAGED_EVENT_SPOOL_DIR must not be the publish spool directory",
+            ));
+        }
+
         Ok(Self {
             control_plane_url,
             token,
@@ -140,11 +158,7 @@ impl ManagedConfig {
             download_mode,
             identity,
             require_placement: parse_bool_env("RUSTACCIO_REQUIRE_PLACEMENT", false),
-            capabilities: vec![
-                "publish-bridge".to_string(),
-                "metadata-proxy".to_string(),
-                format!("download-{}", download_mode.as_str()),
-            ],
+            capabilities: bridge_capabilities(download_mode),
             decision_cache_max_entries: parse_usize_env(
                 "RUSTACCIO_MANAGED_DECISION_CACHE_MAX_ENTRIES",
                 10_000,
@@ -164,10 +178,27 @@ impl ManagedConfig {
                 8 * 1024 * 1024,
             ),
             upload_timeout_ms: parse_u64_env("RUSTACCIO_MANAGED_UPLOAD_TIMEOUT_MS", 300_000),
-            event_queue_capacity: parse_usize_env("RUSTACCIO_MANAGED_EVENT_QUEUE_CAPACITY", 1024),
-            spool_dir: data_dir.join("managed-spool"),
+            event_spool_dir,
+            event_spool_max_bytes: parse_u64_env(
+                "RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES",
+                64 * 1024 * 1024,
+            ),
+            spool_dir,
         })
     }
+}
+
+/// Capabilities advertised on fleet heartbeats. `events_v2` and
+/// `upstream_forward` mark a node that spools the expanded event contract and
+/// can reverse-proxy names the control plane classifies as upstream.
+pub fn bridge_capabilities(download_mode: DownloadMode) -> Vec<String> {
+    vec![
+        "publish-bridge".to_string(),
+        "metadata-proxy".to_string(),
+        format!("download-{}", download_mode.as_str()),
+        events::CAPABILITY_EVENTS_V2.to_string(),
+        events::CAPABILITY_UPSTREAM_FORWARD.to_string(),
+    ]
 }
 
 fn misconfigured(message: impl Into<String>) -> RegistryError {
@@ -216,6 +247,8 @@ pub struct ManagedState {
     pub metadata: cache::MetadataCache,
     pub registry_hosts: cache::RegistryHostCache,
     pub events: events::EventReporter,
+    /// Stops the event worker when the bridge is dropped.
+    pub event_shutdown: events::EventShutdown,
     pub fleet: fleet::FleetState,
 }
 
@@ -233,12 +266,26 @@ impl ManagedState {
 
     /// Build the bridge from an explicit configuration (used by tests).
     pub async fn new(config: ManagedConfig) -> Result<Self, RegistryError> {
+        if config.event_spool_dir == config.spool_dir {
+            return Err(misconfigured(
+                "managed event spool directory must differ from the publish spool directory",
+            ));
+        }
         tokio::fs::create_dir_all(&config.spool_dir).await?;
         sweep_spool_dir(&config.spool_dir).await;
         let client = Arc::new(client::ControlPlaneClient::new(
             &config.control_plane_url,
             &config.token,
         )?);
+        let events = events::EventReporter::start(
+            Arc::clone(&client),
+            events::EventReporterConfig::new(
+                config.event_spool_dir.clone(),
+                config.event_spool_max_bytes,
+            ),
+        )
+        .await?;
+        let event_shutdown = events.shutdown_guard();
         debug!(
             control_plane_url = config.control_plane_url,
             metadata_origin = config.metadata_origin,
@@ -249,7 +296,8 @@ impl ManagedState {
             "initialized managed data-plane bridge"
         );
         Ok(Self {
-            events: events::EventReporter::new(Arc::clone(&client), config.event_queue_capacity),
+            events,
+            event_shutdown,
             decisions: cache::DecisionCache::new(
                 config.decision_cache_max_entries,
                 config.decision_cache_ttl_ms,
@@ -324,5 +372,26 @@ async fn sweep_spool_dir(spool_dir: &PathBuf) {
         if let Err(error) = tokio::fs::remove_file(entry.path()).await {
             debug!(error = ?error, "failed to remove stale publish spool file");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bridge_capabilities_advertise_events_v2_and_upstream_forward() {
+        let caps = bridge_capabilities(DownloadMode::Redirect);
+        assert!(caps.iter().any(|cap| cap == "publish-bridge"));
+        assert!(caps.iter().any(|cap| cap == "download-redirect"));
+        assert!(
+            caps.iter().any(|cap| cap == events::CAPABILITY_EVENTS_V2),
+            "heartbeats must advertise the expanded event contract"
+        );
+        assert!(
+            caps.iter()
+                .any(|cap| cap == events::CAPABILITY_UPSTREAM_FORWARD),
+            "heartbeats must advertise upstream forwarding"
+        );
     }
 }

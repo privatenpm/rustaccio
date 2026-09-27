@@ -5,7 +5,9 @@
 //! metadata writes are reverse-proxied to the control-plane registry surface;
 //! publishes go through the reserve → upload → finalize bridge; downloads are
 //! resolved to presigned URLs and served as redirects (default) or streamed
-//! through (`RUSTACCIO_MANAGED_DOWNLOAD_MODE=proxy`).
+//! through (`RUSTACCIO_MANAGED_DOWNLOAD_MODE=proxy`). An authorize answer of
+//! `route: "upstream"` reverse-proxies the original request to the
+//! control-plane npm surface instead; uplinks stay disabled.
 
 use super::cache::DecisionScope;
 use super::client::{
@@ -141,10 +143,23 @@ pub async fn dispatch(input: ManagedRequest) -> Result<Response<Body>, RegistryE
                 "",
             )
             .await?;
+            if decision.is_upstream() {
+                return forward_npm_surface(&managed, &method, &path, query.as_deref(), &headers)
+                    .await;
+            }
             if !decision.allowed {
                 return Err(deny(decision.reason.as_deref()));
             }
-            return proxy_metadata(&managed, &method, &path, query.as_deref(), &headers).await;
+            return proxy_metadata(
+                &managed,
+                &method,
+                &path,
+                query.as_deref(),
+                &headers,
+                &package_name,
+                &decision,
+            )
+            .await;
         }
         if method == Method::PUT || (method == Method::DELETE && tag.is_some()) {
             let decision = authorize(
@@ -190,8 +205,9 @@ pub async fn dispatch(input: ManagedRequest) -> Result<Response<Body>, RegistryE
         .await;
     }
 
-    // Fail closed: in managed mode there is no upstream passthrough and no
-    // local metadata to serve.
+    // Unmatched routes stay 404. Managed mode does not consult uplinks.
+    // Package names the control plane classifies as upstream are forwarded
+    // from the authorize answer; an absent `route` keeps this 404.
     Err(RegistryError::http(StatusCode::NOT_FOUND, "not found"))
 }
 
@@ -244,10 +260,29 @@ async fn handle_package_routes(input: PackageInput) -> Result<Response<Body>, Re
                     "",
                 )
                 .await?;
+                if decision.is_upstream() {
+                    return forward_npm_surface(
+                        &managed,
+                        &method,
+                        &path,
+                        query.as_deref(),
+                        &headers,
+                    )
+                    .await;
+                }
                 if !decision.allowed {
                     return Err(deny(decision.reason.as_deref()));
                 }
-                return proxy_metadata(&managed, &method, &path, query.as_deref(), &headers).await;
+                return proxy_metadata(
+                    &managed,
+                    &method,
+                    &path,
+                    query.as_deref(),
+                    &headers,
+                    &package_name,
+                    &decision,
+                )
+                .await;
             }
             (Some(OP_TARBALL_READ), [_, filename]) => {
                 return handle_download(DownloadInput {
@@ -257,6 +292,8 @@ async fn handle_package_routes(input: PackageInput) -> Result<Response<Body>, Re
                     request_id,
                     token,
                     host,
+                    path,
+                    query,
                     package_name,
                     filename: filename.clone(),
                 })
@@ -466,6 +503,8 @@ async fn proxy_metadata(
     path: &str,
     query: Option<&str>,
     headers: &HeaderMap,
+    package: &str,
+    decision: &AuthorizeDecision,
 ) -> Result<Response<Body>, RegistryError> {
     let abbreviated = headers
         .get(header::ACCEPT)
@@ -486,12 +525,15 @@ async fn proxy_metadata(
             .split(',')
             .any(|candidate| candidate.trim() == "*" || candidate.trim() == etag)
         {
+            observe_packument_hit(managed, decision, package, 0, true);
             return Ok(Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header(header::ETAG, etag)
                 .body(Body::empty())
                 .unwrap_or_else(|_| Response::new(Body::empty())));
         }
+        let hit_bytes = entry.body.len() as u64;
+        observe_packument_hit(managed, decision, package, hit_bytes, false);
         let mut builder = Response::builder().status(StatusCode::OK);
         if let Some(content_type) = entry.content_type.as_deref() {
             builder = builder.header(header::CONTENT_TYPE, content_type);
@@ -629,6 +671,74 @@ async fn proxy_write(
     ))
 }
 
+fn observe_packument_hit(
+    managed: &ManagedState,
+    decision: &AuthorizeDecision,
+    package: &str,
+    bytes: u64,
+    not_modified: bool,
+) {
+    managed
+        .events
+        .observe_metadata(super::events::MetadataObservation {
+            tenant_id: decision.tenant_id().unwrap_or_default().to_string(),
+            registry_id: decision.registry_id().unwrap_or_default().to_string(),
+            credential_id: decision.credential_id().unwrap_or_default().to_string(),
+            package: package.to_string(),
+            bytes,
+            not_modified,
+            at: chrono::Utc::now(),
+        });
+}
+
+/// Reverse-proxy the original request to the control-plane npm surface.
+///
+/// Authorize answers `route: "upstream"` here instead of 404. The node never
+/// talks to public registries; uplinks stay disabled. Host and Authorization
+/// are the caller's, so the surface stays host-dispatched and authenticates
+/// the original credential. An absent `route` does not reach this function.
+async fn forward_npm_surface(
+    managed: &ManagedState,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Response<Body>, RegistryError> {
+    let url = with_query(&managed.config.metadata_origin, path, query);
+    let request = forward_headers(managed.client.http().request(method.clone(), &url), headers);
+    let response = request.send().await.map_err(|err| {
+        warn!(error = ?err, "upstream forward request failed");
+        control_plane_unavailable("upstream forward")
+    })?;
+    Ok(proxied_response(response))
+}
+
+fn proxied_response(response: reqwest::Response) -> Response<Body> {
+    let status = response.status();
+    let mut builder = Response::builder().status(status);
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_RANGE,
+        header::CONTENT_ENCODING,
+        header::ETAG,
+        header::CACHE_CONTROL,
+        header::LOCATION,
+        header::LAST_MODIFIED,
+        header::ACCEPT_RANGES,
+    ] {
+        if let Some(value) = response.headers().get(&name) {
+            builder = builder.header(name, value.clone());
+        }
+    }
+    if let Some(value) = response.headers().get("x-package-revision") {
+        builder = builder.header("x-package-revision", value.clone());
+    }
+    builder
+        .body(Body::from_stream(response.bytes_stream()))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
 fn with_query(origin: &str, path: &str, query: Option<&str>) -> String {
     match query {
         Some(query) if !query.is_empty() => format!("{origin}{path}?{query}"),
@@ -650,13 +760,17 @@ fn forward_headers(
         header::IF_NONE_MATCH,
         header::IF_MODIFIED_SINCE,
         header::HOST,
+        header::RANGE,
+        header::USER_AGENT,
     ] {
         if let Some(value) = headers.get(&name) {
             request = request.header(name, value.clone());
         }
     }
-    if let Some(value) = headers.get("x-request-id") {
-        request = request.header("x-request-id", value.clone());
+    for name in ["x-request-id", "npm-command", "npm-session"] {
+        if let Some(value) = headers.get(name) {
+            request = request.header(name, value.clone());
+        }
     }
     request
 }
@@ -680,6 +794,8 @@ struct DownloadInput {
     request_id: String,
     token: String,
     host: String,
+    path: String,
+    query: Option<String>,
     package_name: String,
     filename: String,
 }
@@ -692,6 +808,8 @@ async fn handle_download(input: DownloadInput) -> Result<Response<Body>, Registr
         request_id,
         token,
         host,
+        path,
+        query,
         package_name,
         filename,
     } = input;
@@ -713,6 +831,9 @@ async fn handle_download(input: DownloadInput) -> Result<Response<Body>, Registr
         &version,
     )
     .await?;
+    if decision.is_upstream() {
+        return forward_npm_surface(&managed, &method, &path, query.as_deref(), &headers).await;
+    }
     if !decision.allowed {
         return Err(deny(decision.reason.as_deref()));
     }
@@ -771,15 +892,35 @@ async fn handle_download(input: DownloadInput) -> Result<Response<Body>, Registr
         .map(|package| package.owner_tenant_id.clone())
         .or_else(|| decision.tenant_id().map(ToOwned::to_owned));
 
+    let registry_id = resolve
+        .package
+        .as_ref()
+        .map(|package| package.registry_id.clone())
+        .filter(|id| !id.is_empty())
+        .or_else(|| decision.registry_id().map(ToOwned::to_owned))
+        .unwrap_or_default();
+    let report = TransferReport {
+        events: managed.events.clone(),
+        kind: super::events::EVENT_DOWNLOAD,
+        tenant_id: tenant_id.clone(),
+        package: package_name.clone(),
+        version: resolve
+            .version
+            .as_ref()
+            .map(|version| version.semver.clone()),
+        credential_id: resolve.credential_id.clone(),
+        registry_id,
+        file: filename.clone(),
+        declared_bytes: tarball_bytes,
+        host: host.clone(),
+        request_id: request_id.clone(),
+        headers: headers.clone(),
+    };
+
     if managed.config.download_mode == DownloadMode::Redirect {
-        managed.events.report(super::events::EventReporter::event(
-            super::events::EVENT_DOWNLOAD,
-            tenant_id.as_deref(),
-            &package_name,
-            resolve.version.as_ref().map(|v| v.semver.as_str()),
-            tarball_bytes,
-            resolve.credential_id.as_deref(),
-        ));
+        report
+            .emit(tarball_bytes, super::events::STATUS_REDIRECTED, None)
+            .await;
         return Ok(Response::builder()
             .status(StatusCode::FOUND)
             .header(header::LOCATION, download_url)
@@ -822,13 +963,19 @@ async fn handle_download(input: DownloadInput) -> Result<Response<Body>, Registr
     let content_range = header_value(&response, header::CONTENT_RANGE);
     let content_length = header_value(&response, header::CONTENT_LENGTH);
 
+    let transfer_status = if status == StatusCode::PARTIAL_CONTENT {
+        super::events::STATUS_PARTIAL
+    } else if status.is_success() {
+        super::events::STATUS_COMPLETE
+    } else {
+        super::events::STATUS_ABORTED
+    };
+    let range = content_range
+        .as_deref()
+        .and_then(super::events::parse_content_range);
+
     let transferred = Arc::new(AtomicU64::new(0));
     let counter = Arc::clone(&transferred);
-    let events = managed.events.clone();
-    let tenant = tenant_id.clone();
-    let package = package_name.clone();
-    let version = resolve.version.as_ref().map(|v| v.semver.clone());
-    let credential_id = resolve.credential_id.clone();
     let counted = response.bytes_stream().map(move |chunk| {
         if let Ok(bytes) = &chunk {
             counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -837,14 +984,7 @@ async fn handle_download(input: DownloadInput) -> Result<Response<Body>, Registr
     });
     let events_done = futures::stream::once(async move {
         let bytes = transferred.load(Ordering::Relaxed);
-        events.report(super::events::EventReporter::event(
-            super::events::EVENT_DOWNLOAD,
-            tenant.as_deref(),
-            &package,
-            version.as_deref(),
-            bytes,
-            credential_id.as_deref(),
-        ));
+        report.emit(bytes, transfer_status, range).await;
         Ok::<Bytes, reqwest::Error>(Bytes::new())
     });
     let body = Body::from_stream(counted.chain(events_done));
@@ -862,6 +1002,53 @@ async fn handle_download(input: DownloadInput) -> Result<Response<Body>, Registr
     Ok(builder
         .body(body)
         .unwrap_or_else(|_| Response::new(Body::empty())))
+}
+
+struct TransferReport {
+    events: super::events::EventReporter,
+    kind: &'static str,
+    tenant_id: Option<String>,
+    package: String,
+    version: Option<String>,
+    credential_id: Option<String>,
+    registry_id: String,
+    file: String,
+    declared_bytes: u64,
+    host: String,
+    request_id: String,
+    headers: HeaderMap,
+}
+
+impl TransferReport {
+    async fn emit(
+        self,
+        bytes: u64,
+        status: &'static str,
+        range: Option<super::client::EventRange>,
+    ) {
+        let mut event = super::events::EventReporter::event(
+            self.kind,
+            self.tenant_id.as_deref(),
+            &self.package,
+            self.version.as_deref(),
+            bytes,
+            self.credential_id.as_deref(),
+        );
+        super::events::apply_transfer(
+            &mut event,
+            super::events::TransferFacts {
+                registry_id: &self.registry_id,
+                file: &self.file,
+                declared_bytes: self.declared_bytes,
+                status,
+                range,
+                host: &self.host,
+                request_id: &self.request_id,
+                headers: &self.headers,
+            },
+        );
+        self.events.report(event).await;
+    }
 }
 
 /// Infer the exact version from a tarball filename (`name-1.2.3.tgz`).
@@ -1086,14 +1273,23 @@ async fn publish_inner(
         }
     };
 
-    managed.events.report(super::events::EventReporter::event(
-        super::events::EVENT_PUBLISH,
-        decision.tenant_id(),
-        &publish.name,
-        Some(&publish.version),
-        tarball_bytes,
-        None,
-    ));
+    let file = format!("{}-{}.tgz", publish.name, publish.version);
+    TransferReport {
+        events: managed.events.clone(),
+        kind: super::events::EVENT_PUBLISH,
+        tenant_id: decision.tenant_id().map(ToOwned::to_owned),
+        package: publish.name.clone(),
+        version: Some(publish.version.clone()),
+        credential_id: decision.credential_id().map(ToOwned::to_owned),
+        registry_id,
+        file,
+        declared_bytes: tarball_bytes,
+        host: host.to_string(),
+        request_id: request_id.to_string(),
+        headers: headers.clone(),
+    }
+    .emit(tarball_bytes, super::events::STATUS_COMPLETE, None)
+    .await;
     Ok(json_response(StatusCode::CREATED, body))
 }
 

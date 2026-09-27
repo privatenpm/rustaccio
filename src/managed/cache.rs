@@ -410,6 +410,7 @@ mod tests {
                 ..AuthorizeSubject::default()
             }),
             package: None,
+            route: None,
         }
     }
 

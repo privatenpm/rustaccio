@@ -116,6 +116,10 @@ pub struct PackageSummary {
     pub revision: i64,
 }
 
+/// Authorize answers may classify a name the control plane will serve itself.
+/// Absent (and `"hosted"`) keep today's behavior; only `"upstream"` forwards.
+pub const ROUTE_UPSTREAM: &str = "upstream";
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AuthorizeDecision {
     #[serde(default)]
@@ -128,6 +132,9 @@ pub struct AuthorizeDecision {
     pub subject: Option<AuthorizeSubject>,
     #[serde(default)]
     pub package: Option<PackageSummary>,
+    /// `"hosted"` or `"upstream"`. Absent on older control planes.
+    #[serde(default)]
+    pub route: Option<String>,
 }
 
 impl AuthorizeDecision {
@@ -153,6 +160,29 @@ impl AuthorizeDecision {
             .or(subject.customer_id.as_deref())
             .or(subject.token_id.as_deref())
     }
+
+    /// The control plane asked this node to reverse-proxy the original request
+    /// to the npm surface instead of answering from hosted storage.
+    pub fn is_upstream(&self) -> bool {
+        self.route.as_deref() == Some(ROUTE_UPSTREAM)
+    }
+
+    /// Credential the decision was made for: a publisher token, else a
+    /// download-key customer. Empty values are omitted.
+    pub fn credential_id(&self) -> Option<&str> {
+        let subject = self.subject.as_ref()?;
+        nonempty(subject.token_id.as_deref()).or_else(|| nonempty(subject.customer_id.as_deref()))
+    }
+
+    pub fn registry_id(&self) -> Option<&str> {
+        self.package
+            .as_ref()
+            .and_then(|package| nonempty(Some(package.registry_id.as_str())))
+    }
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, Serialize)]
@@ -271,7 +301,17 @@ pub struct DownloadResolveResponse {
     pub credential_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Inclusive byte range of a partial (206) transfer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// One usage observation. Optional fields are omitted when unknown so older
+/// control planes still accept the payload. `client_ip` is a trusted edge
+/// address only; client-supplied forwarding headers are never copied here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ManagedEvent {
     pub event_id: String,
     pub kind: String,
@@ -283,6 +323,41 @@ pub struct ManagedEvent {
     pub credential_id: Option<String>,
     pub bytes: u64,
     pub occurred_at: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<EventRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npm_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npm_session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<String>,
+    /// Aggregate observation count for `kind = "metadata"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+    /// Aggregate 304 count for `kind = "metadata"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_modified: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -697,8 +772,28 @@ mod tests {
         );
         assert_eq!(decision.tenant_id(), Some("org_1"));
         assert_eq!(decision.principal_name(), Some("user_1"));
+        assert!(
+            !decision.is_upstream(),
+            "absent route is not an upstream forward"
+        );
+        assert_eq!(decision.credential_id(), Some("ntok_1"));
         let package = decision.package.expect("package summary");
         assert_eq!(package.registry_id, "reg_1");
+    }
+
+    #[test]
+    fn authorize_decision_parses_upstream_route() {
+        let payload = json!({
+            "allowed": false,
+            "reason": "package_not_found",
+            "route": "upstream"
+        });
+        let decision: AuthorizeDecision = serde_json::from_value(payload).expect("parse");
+        assert!(decision.is_upstream());
+
+        let hosted: AuthorizeDecision =
+            serde_json::from_value(json!({"allowed": true, "route": "hosted"})).expect("parse");
+        assert!(!hosted.is_upstream(), "hosted keeps the local path");
     }
 
     #[test]
@@ -783,6 +878,7 @@ mod tests {
             credential_id: Some("rdk_123".to_string()),
             bytes: 7,
             occurred_at: "2026-09-22T12:00:00Z".to_string(),
+            ..ManagedEvent::default()
         };
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(

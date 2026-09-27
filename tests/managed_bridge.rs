@@ -24,7 +24,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{header, method, path},
 };
 
 const TOKEN: &str = "npm_test_token";
@@ -71,7 +71,8 @@ fn managed_config(control_plane: &MockServer, data_dir: PathBuf) -> ManagedConfi
         metadata_cache_max_bytes: 1024 * 1024,
         max_metadata_bytes: 8 * 1024 * 1024,
         upload_timeout_ms: 30_000,
-        event_queue_capacity: 16,
+        event_spool_dir: data_dir.join("managed-events"),
+        event_spool_max_bytes: 8 * 1024 * 1024,
         spool_dir: data_dir.join("managed-spool"),
     }
 }
@@ -411,4 +412,89 @@ async fn node_credential_flushes_managed_caches() {
     )
     .await;
     assert_eq!(allowed.status(), StatusCode::OK);
+}
+
+fn authorize_with_route(route: Option<&str>) -> Value {
+    let mut body = authorize_response(false, "package_not_found");
+    if let Some(route) = route {
+        body["route"] = json!(route);
+    }
+    body
+}
+
+#[tokio::test]
+async fn upstream_route_forwards_original_host_and_authorization() {
+    let control_plane = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/registry/v1/authorize"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(authorize_with_route(Some("upstream"))),
+        )
+        .mount(&control_plane)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/lodash"))
+        .and(header("host", "npm.example.test"))
+        .and(header("authorization", format!("Bearer {TOKEN}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({ "name": "lodash" })),
+        )
+        .expect(1)
+        .mount(&control_plane)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/lodash/-/lodash-4.17.21.tgz"))
+        .and(header("host", "npm.example.test"))
+        .and(header("authorization", format!("Bearer {TOKEN}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/octet-stream")
+                .set_body_bytes(b"tarball".to_vec()),
+        )
+        .expect(1)
+        .mount(&control_plane)
+        .await;
+    // Hosted resolve must not run: the node forwards instead of serving storage.
+    Mock::given(method("POST"))
+        .and(path("/api/registry/v1/downloads/resolve"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&control_plane)
+        .await;
+
+    let (app, _temp) = managed_app(&control_plane).await;
+    let packument = send(&app, authed(Method::GET, "/lodash", Body::empty())).await;
+    assert_eq!(packument.status(), StatusCode::OK);
+    assert_eq!(body_json(packument).await["name"], "lodash");
+
+    let tarball = send(
+        &app,
+        authed(Method::GET, "/lodash/-/lodash-4.17.21.tgz", Body::empty()),
+    )
+    .await;
+    assert_eq!(tarball.status(), StatusCode::OK);
+    control_plane.verify().await;
+}
+
+#[tokio::test]
+async fn absent_route_stays_not_found() {
+    let control_plane = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/registry/v1/authorize"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(authorize_with_route(None)))
+        .mount(&control_plane)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/lodash"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "name": "lodash" })))
+        .expect(0)
+        .mount(&control_plane)
+        .await;
+
+    let (app, _temp) = managed_app(&control_plane).await;
+    let response = send(&app, authed(Method::GET, "/lodash", Body::empty())).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    control_plane.verify().await;
 }

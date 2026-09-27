@@ -148,32 +148,65 @@ header; responses without it are never cached.
 4. Without a `download_url` the node answers 502
    (`CONTROL_PLANE_UNAVAILABLE`); direct-storage is the supported shape.
 
+## Upstream forward
+
+Authorize answers may include an optional `route` of `"hosted"` or
+`"upstream"`. An absent field, and `"hosted"`, keep today's behavior
+(a denied name answers 404). `"upstream"` reverse-proxies the original
+request — method, path, query, `Host`, `Authorization`, and the npm client
+headers — to the control-plane npm surface
+(`RUSTACCIO_MANAGED_METADATA_ORIGIN`, default the control-plane URL). The
+node does not talk to public registries itself: uplinks stay disabled in
+managed mode, and a forward failure is a 502, not a local fallback.
+
 ## Events
 
 Completed transfers are reported through `POST /v1/events` with UUID v4 event
 IDs: `publish` after a committed finalize, `download` when a redirect is
-issued or a proxied stream completes (bytes actually streamed). Delivery is
-best-effort: events sit on a bounded channel
-(`RUSTACCIO_MANAGED_EVENT_QUEUE_CAPACITY`, default 1024), are flushed in
-batches (50 or 5s), and are dropped on overflow with a warning. Event
-delivery never blocks or fails an npm operation.
-Download events echo `credential_id` and the resolved version when present,
-so the control plane can attribute customer delivery. Older control planes
-that omit it remain compatible.
+issued (`status: redirected`, bytes = the recorded tarball size) or a proxied
+stream completes (bytes actually streamed; `complete`, `partial` with `range`,
+or `aborted`). Each event is fsynced to an append-only spool
+(`RUSTACCIO_MANAGED_EVENT_SPOOL_DIR`, default `<data_dir>/managed-events`,
+bounded by `RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES`, default 64 MiB) before
+the enqueue returns. A background worker batches the spool (50 or 5s) and
+retries a failed batch — same `event_id`s — until the control plane answers
+2xx. Acknowledged batches are removed; a restart replays whatever is left.
+When the byte bound is hit the newest event is dropped and
+`rustaccio_events_dropped_total` is incremented (always present on the
+metrics endpoint, including zero). A spool failure does not fail the npm
+operation.
+
+Download and publish events carry the optional transfer context when known:
+`registry_id`, `format` (`npm`), `file`, `declared_bytes`, `status`, `range`,
+`client_ip`, `user_agent`, `npm_command`, `npm_session`, `ci`, `host` and
+`request_id`. `client_ip` is the trusted edge address (`Fly-Client-IP`, else
+`CF-Connecting-IP`); a client-supplied `X-Forwarded-For` is never copied.
+`ci` is set from an npm `ci/<name>` user-agent token or a pip/twine
+`"ci":true` marker. `cache` is left unset on hosted transfers (it denotes an
+upstream cache outcome the node does not observe). Older control planes that
+ignore unknown fields remain compatible. Download events still echo
+`credential_id` and the resolved version when present.
+
+Packument cache hits, which never reach the control plane, are aggregated per
+(registry, credential, package, minute) and emitted as one `kind: "metadata"`
+event with `count`, `bytes` and `not_modified` when the minute closes.
 
 ## Fleet
 
 At startup and every 30s the node POSTs `/v1/fleet/heartbeat` with its
 identity (`RUSTACCIO_DATA_PLANE_ID`, default hostname), the binary version
-and capabilities. When the response's `config_revision` is newer than the
-stored one, the node fetches `GET /v1/fleet/config?after=<current>` and
-stores the content. `RUSTACCIO_REQUIRE_PLACEMENT=true` makes placement a
-startup requirement (see above).
+and capabilities (`publish-bridge`, `metadata-proxy`, `download-redirect` or
+`download-proxy`, plus `events_v2` and `upstream_forward`). When the
+response's `config_revision` is newer than the stored one, the node fetches
+`GET /v1/fleet/config?after=<current>` and stores the content.
+`RUSTACCIO_REQUIRE_PLACEMENT=true` makes placement a startup requirement
+(see above).
 
 ## Not served in managed mode
 
 Search (`/-/v1/search`), `/-/all`, the npm bootstrap payload, the web UI
 package views, and local storage answers are disabled: unmatched routes fail
 closed with 404. Local ACLs, uplinks and the external auth/policy HTTP
-plugins are never consulted for private operations; metrics keep working when
+plugins are never consulted for private operations, including when an
+authorize answer asks for an upstream forward. Metrics keep working when
 `RUSTACCIO_METRICS_REQUIRE_ADMIN=false`.

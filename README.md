@@ -781,7 +781,10 @@ authorizes every private operation over HTTP, decodes/hashes publish bodies
 with bounded memory (spooling tarballs to disk), uploads them to
 control-plane issued create-only presigned URLs, reverse-proxies packument
 reads and metadata writes, redirects (or proxies) tarball downloads, and
-reports download/publish events.
+reports download/publish events from a durable spool. An authorize answer
+of `route: "upstream"` is reverse-proxied to the control-plane npm surface
+(original `Host` and `Authorization`); an absent route stays 404, and
+uplinks stay disabled.
 
 Required env:
 
@@ -796,7 +799,8 @@ Optional env:
 - `RUSTACCIO_DATA_PLANE_ID` (fleet identity; default: hostname), `RUSTACCIO_REQUIRE_PLACEMENT=true` to refuse startup until the control plane placed the node
 - `RUSTACCIO_MANAGED_DECISION_CACHE_TTL_MS` (default `30000`; decisions never outlive their control-plane `expires_at`), `RUSTACCIO_MANAGED_DECISION_CACHE_MAX_ENTRIES` (default `10000`)
 - `RUSTACCIO_MANAGED_METADATA_CACHE_TTL_MS` (default `0` = off), `RUSTACCIO_MANAGED_METADATA_CACHE_MAX_ENTRIES` (default `128`), `RUSTACCIO_MANAGED_METADATA_CACHE_MAX_BYTES` (default 4 MiB)
-- `RUSTACCIO_MANAGED_MAX_METADATA_BYTES` (default 8 MiB publish metadata bound), `RUSTACCIO_MANAGED_UPLOAD_TIMEOUT_MS` (default `300000`), `RUSTACCIO_MANAGED_EVENT_QUEUE_CAPACITY` (default `1024`, drop-on-full)
+- `RUSTACCIO_MANAGED_MAX_METADATA_BYTES` (default 8 MiB publish metadata bound), `RUSTACCIO_MANAGED_UPLOAD_TIMEOUT_MS` (default `300000`)
+- `RUSTACCIO_MANAGED_EVENT_SPOOL_DIR` (default `<data_dir>/managed-events`; must not be the publish spool directory) and `RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES` (default 64 MiB). Usage events are fsynced to this spool and retried with the same `event_id` until the control plane acknowledges them. When the bound is hit the newest event is dropped and `rustaccio_events_dropped_total` is incremented (served on the metrics endpoint).
 
 In managed mode control-plane failures fail closed (`502` with
 `CONTROL_PLANE_UNAVAILABLE`); local ACLs, uplinks and the external

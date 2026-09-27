@@ -89,14 +89,21 @@ pub async fn dispatch(
         if state.governance.metrics_require_admin() {
             ensure_admin_authenticated(&state, auth_identity.as_ref())?;
         }
-        if let Some(metrics) = state.governance.render_metrics().await {
-            return Ok(text_response(
-                StatusCode::OK,
-                "text/plain; version=0.0.4",
-                metrics,
-            ));
+        let mut metrics = state.governance.render_metrics().await.unwrap_or_default();
+        if let Some(managed) = &managed {
+            if !metrics.is_empty() && !metrics.ends_with('\n') {
+                metrics.push('\n');
+            }
+            metrics.push_str(&managed.events.render_metrics());
         }
-        return Err(RegistryError::http(StatusCode::NOT_FOUND, "not found"));
+        if metrics.is_empty() {
+            return Err(RegistryError::http(StatusCode::NOT_FOUND, "not found"));
+        }
+        return Ok(text_response(
+            StatusCode::OK,
+            "text/plain; version=0.0.4",
+            metrics,
+        ));
     }
 
     let governance_context = governance_context_for_request(
