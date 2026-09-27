@@ -2448,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "rustaccio"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "aws-config",
