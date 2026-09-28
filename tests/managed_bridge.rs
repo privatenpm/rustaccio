@@ -71,7 +71,7 @@ fn managed_config(control_plane: &MockServer, data_dir: PathBuf) -> ManagedConfi
         metadata_cache_max_bytes: 1024 * 1024,
         max_metadata_bytes: 8 * 1024 * 1024,
         upload_timeout_ms: 30_000,
-        event_spool_dir: data_dir.join("managed-events"),
+        event_spool_dir: Some(data_dir.join("managed-events")),
         event_spool_max_bytes: 8 * 1024 * 1024,
         spool_dir: data_dir.join("managed-spool"),
     }
@@ -101,15 +101,20 @@ fn authorize_response(allowed: bool, reason: &str) -> Value {
 }
 
 async fn managed_app(control_plane: &MockServer) -> (axum::Router, TempDir) {
+    managed_app_with(control_plane, |_| {}).await
+}
+
+async fn managed_app_with(
+    control_plane: &MockServer,
+    configure: impl FnOnce(&mut ManagedConfig),
+) -> (axum::Router, TempDir) {
     let temp = TempDir::new().expect("tempdir");
     let cfg = base_config(temp.path().to_path_buf());
     let store = Arc::new(Store::open(&cfg).await.expect("store"));
     let acl = Acl::new(cfg.acl_rules.clone());
-    let managed = Arc::new(
-        ManagedState::new(managed_config(control_plane, temp.path().to_path_buf()))
-            .await
-            .expect("managed state"),
-    );
+    let mut managed_cfg = managed_config(control_plane, temp.path().to_path_buf());
+    configure(&mut managed_cfg);
+    let managed = Arc::new(ManagedState::new(managed_cfg).await.expect("managed state"));
     let app = build_router(AppState {
         store: store.clone(),
         acl: acl.clone(),
@@ -383,6 +388,80 @@ async fn control_plane_outage_fails_closed() {
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body = body_json(response).await;
     assert_eq!(body["code"], "CONTROL_PLANE_UNAVAILABLE");
+}
+
+#[tokio::test]
+async fn proxy_downloads_complete_while_event_submission_stalls_and_fails() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let control_plane = MockServer::start().await;
+    let storage = MockServer::start().await;
+    let event_attempted = Arc::new(AtomicBool::new(false));
+    let attempted = Arc::clone(&event_attempted);
+    Mock::given(method("POST"))
+        .and(path("/api/registry/v1/events"))
+        .respond_with(move |_: &wiremock::Request| {
+            attempted.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(503).set_delay(Duration::from_secs(2))
+        })
+        .mount(&control_plane)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/registry/v1/authorize"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(authorize_response(true, "")))
+        .mount(&control_plane)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/registry/v1/downloads/resolve"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "allowed": true,
+            "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            "package": { "id": "npkg_1", "name": "demo", "registry_id": "reg_1",
+                "owner_tenant_id": "org_1", "visibility": "private", "revision": 3 },
+            "version": { "semver": "1.0.0", "tarball_bytes": 7 },
+            "download_url": format!("{}/tarball", storage.uri())
+        })))
+        .mount(&control_plane)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/tarball"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"tarball".to_vec()))
+        .mount(&storage)
+        .await;
+    let (app, _temp) = managed_app_with(&control_plane, |cfg| {
+        cfg.download_mode = DownloadMode::Proxy;
+        cfg.event_spool_dir = None;
+    })
+    .await;
+    let download = || async {
+        let response = send(
+            &app,
+            authed(Method::GET, "/demo/-/demo-1.0.0.tgz", Body::empty()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .expect("body")
+                .as_ref(),
+            b"tarball"
+        );
+    };
+    for _ in 0..50 {
+        download().await;
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !event_attempted.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("sender is waiting on the failing events endpoint");
+    tokio::time::timeout(Duration::from_millis(500), download())
+        .await
+        .expect("download must not wait for event submission");
 }
 
 #[tokio::test]

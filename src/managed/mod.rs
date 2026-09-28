@@ -14,6 +14,7 @@ pub mod dispatch;
 pub mod events;
 pub mod extract;
 pub mod fleet;
+mod pending;
 mod spool;
 
 use crate::config::{Config, TarballStorageBackend};
@@ -72,9 +73,9 @@ pub struct ManagedConfig {
     pub max_metadata_bytes: usize,
     /// Presigned upload timeout.
     pub upload_timeout_ms: u64,
-    /// Directory pending usage-event batches are fsynced to. Distinct from
+    /// Optional directory for durable pending events; None uses memory. Distinct from
     /// `spool_dir`, which holds publish tarball bytes and is swept on startup.
-    pub event_spool_dir: PathBuf,
+    pub event_spool_dir: Option<PathBuf>,
     /// Byte bound of the event spool. A new event that would exceed it is
     /// dropped and counted in `rustaccio_events_dropped_total`.
     pub event_spool_max_bytes: u64,
@@ -143,9 +144,8 @@ impl ManagedConfig {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("managed-events"));
-        if event_spool_dir == spool_dir {
+            .map(PathBuf::from);
+        if event_spool_dir.as_ref() == Some(&spool_dir) {
             return Err(misconfigured(
                 "RUSTACCIO_MANAGED_EVENT_SPOOL_DIR must not be the publish spool directory",
             ));
@@ -266,7 +266,7 @@ impl ManagedState {
 
     /// Build the bridge from an explicit configuration (used by tests).
     pub async fn new(config: ManagedConfig) -> Result<Self, RegistryError> {
-        if config.event_spool_dir == config.spool_dir {
+        if config.event_spool_dir.as_ref() == Some(&config.spool_dir) {
             return Err(misconfigured(
                 "managed event spool directory must differ from the publish spool directory",
             ));

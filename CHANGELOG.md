@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Managed event reporting defaults to a bounded memory queue. An explicit `RUSTACCIO_MANAGED_EVENT_SPOOL_DIR` enables disk persistence. Requests no longer wait for spool writes; a bounded background handoff drops on saturation, and an unusable directory falls back to memory so event storage cannot prevent startup.
+
 ### Added
 
-- Managed usage events are fsynced to a durable spool (`RUSTACCIO_MANAGED_EVENT_SPOOL_DIR`, `RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES`) and retried with the same `event_id` until the control plane acknowledges them. A full spool drops the newest event and increments `rustaccio_events_dropped_total` instead of failing the npm operation.
+- Managed usage events can be fsynced in the background to a durable spool (`RUSTACCIO_MANAGED_EVENT_SPOOL_DIR`, `RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES`) and retried with the same `event_id` until the control plane acknowledges them. A full spool drops the newest event and increments `rustaccio_events_dropped_total` instead of failing the npm operation.
 - Managed download and publish events now carry the optional transfer context (`registry_id`, `format`, `file`, `declared_bytes`, `status`, `range`, trusted edge `client_ip`, `user_agent`, `npm_command`, `npm_session`, `ci`, `host`, `request_id`). `client_ip` is taken from `Fly-Client-IP` or `CF-Connecting-IP`; client-supplied `X-Forwarded-For` is ignored.
 - Packument cache hits are aggregated per registry, credential, package and minute and reported as `kind: "metadata"` events (`count`, `bytes`, `not_modified`).
 - An authorize answer of `route: "upstream"` reverse-proxies the original request to the control-plane npm surface, preserving `Host` and `Authorization`. An absent or `hosted` route keeps the previous 404. Uplinks stay disabled in managed mode.

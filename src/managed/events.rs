@@ -1,17 +1,18 @@
-//! Durable usage-event reporting to the control plane.
+//! Best-effort usage reporting, isolated from customer request latency.
 //!
-//! Events are fsynced to an append-only spool on enqueue and never dropped
-//! silently. A background worker batches the spool into `POST /v1/events`
-//! calls and retries a failed batch — same `event_id`s — until the control
-//! plane answers 2xx. Only then is the batch removed. When the spool's byte
-//! bound is hit, the newest event is dropped and
-//! `rustaccio_events_dropped_total` is incremented.
+//! Requests use a bounded, nonblocking handoff. A background writer keeps
+//! events in bounded memory, or fsyncs them to an explicitly configured spool.
+//! A separate sender retries with the same IDs until Go acknowledges them.
+//! Full queues and storage failures drop events, never fail npm operations.
+//! An invalid spool directory falls back to memory. Events waiting for the
+//! writer, and all memory-only events, can be lost on an abrupt shutdown.
 //!
 //! Metadata (packument) cache hits are aggregated per
 //! (registry, credential, package, minute) and emitted as one `metadata`
 //! event when the minute closes.
 
 use super::client::{ControlPlaneClient, EventRange, ManagedEvent};
+use super::pending::PendingEvents;
 use super::spool::{AppendOutcome, EventSpool};
 use crate::error::RegistryError;
 use axum::http::HeaderMap;
@@ -20,12 +21,15 @@ use std::{
     net::IpAddr,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
-use tokio::{sync::Notify, task::JoinHandle};
+use tokio::{
+    sync::{Notify, mpsc},
+    task::JoinHandle,
+};
 use tracing::{debug, warn};
 
 pub const EVENT_DOWNLOAD: &str = "download";
@@ -40,6 +44,9 @@ pub const STATUS_REDIRECTED: &str = "redirected";
 pub const FORMAT_NPM: &str = "npm";
 
 const FLUSH_BATCH: usize = 50;
+const INGRESS_CAPACITY: usize = 1024;
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_METADATA_WINDOWS: usize = 1024;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(200);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -58,14 +65,14 @@ pub const CAPABILITY_UPSTREAM_FORWARD: &str = "upstream_forward";
 
 #[derive(Debug, Clone)]
 pub struct EventReporterConfig {
-    pub spool_dir: PathBuf,
+    pub spool_dir: Option<PathBuf>,
     pub max_bytes: u64,
     pub flush_interval: Duration,
     pub flush_batch: usize,
 }
 
 impl EventReporterConfig {
-    pub fn new(spool_dir: PathBuf, max_bytes: u64) -> Self {
+    pub fn new(spool_dir: Option<PathBuf>, max_bytes: u64) -> Self {
         Self {
             spool_dir,
             max_bytes,
@@ -78,18 +85,20 @@ impl EventReporterConfig {
 #[derive(Clone)]
 pub struct EventReporter {
     inner: Arc<ReporterInner>,
+    sender: mpsc::Sender<ManagedEvent>,
 }
 
 struct ReporterInner {
-    spool: EventSpool,
+    spool: OnceLock<PendingEvents>,
     client: Arc<ControlPlaneClient>,
     notify: Notify,
+    stop: Notify,
     shutdown: AtomicBool,
     dropped: AtomicU64,
     metadata: std::sync::Mutex<MetadataAggregator>,
     flush_interval: Duration,
     flush_batch: usize,
-    worker: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    workers: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
 }
 
 /// One packument cache hit to fold into the current minute window.
@@ -109,45 +118,35 @@ impl EventReporter {
         client: Arc<ControlPlaneClient>,
         config: EventReporterConfig,
     ) -> Result<Self, RegistryError> {
-        let spool = EventSpool::open(&config.spool_dir, config.max_bytes)?;
+        let (sender, receiver) = mpsc::channel(INGRESS_CAPACITY);
         let inner = Arc::new(ReporterInner {
-            spool,
+            spool: OnceLock::new(),
             client,
             notify: Notify::new(),
+            stop: Notify::new(),
             shutdown: AtomicBool::new(false),
             dropped: AtomicU64::new(0),
             metadata: std::sync::Mutex::new(MetadataAggregator::default()),
             flush_interval: config.flush_interval,
             flush_batch: config.flush_batch.max(1),
-            worker: tokio::sync::Mutex::new(None),
+            workers: tokio::sync::Mutex::new(Vec::new()),
         });
+        let writer = tokio::spawn(spool_writer(Arc::clone(&inner), receiver, config));
         let worker = tokio::spawn(event_worker(Arc::clone(&inner)));
-        *inner.worker.lock().await = Some(worker);
-        Ok(Self { inner })
+        *inner.workers.lock().await = vec![writer, worker];
+        Ok(Self { inner, sender })
     }
 
-    /// Persist one event. Returns after the spool fsync. A full spool drops
-    /// this event (the newest) and increments the dropped counter.
+    /// Enqueue without waiting for disk or the control plane. A full handoff
+    /// drops the newest event. Durability begins only after the writer fsyncs.
     pub async fn report(&self, event: ManagedEvent) {
-        let event_id = event.event_id.clone();
-        let appended = tokio::task::spawn_blocking({
-            let spool = self.inner.spool.clone();
-            move || spool.append(&event)
-        })
-        .await;
-        match appended {
-            Ok(Ok(AppendOutcome::Stored)) => self.inner.notify.notify_one(),
-            Ok(Ok(AppendOutcome::Dropped)) => {
-                self.note_dropped(&event_id, "managed event spool full; dropping newest event")
-            }
-            Ok(Err(error)) => {
-                self.note_dropped(&event_id, "failed to spool managed event; dropping event");
-                warn!(event_id = %event_id, error = ?error, "event spool write failed");
-            }
-            Err(error) => {
-                self.note_dropped(&event_id, "failed to spool managed event; dropping event");
-                warn!(event_id = %event_id, error = ?error, "event spool task failed");
-            }
+        if self.inner.shutdown.load(Ordering::SeqCst) {
+            self.note_dropped(&event.event_id, "event reporter stopping; dropping event");
+        } else if let Err(error) = self.sender.try_send(event) {
+            self.note_dropped(
+                &error.into_inner().event_id,
+                "event writer unavailable or busy; dropping event",
+            );
         }
     }
 
@@ -155,12 +154,13 @@ impl EventReporter {
         if observation.tenant_id.trim().is_empty() || observation.package.trim().is_empty() {
             return;
         }
-        let mut aggregator = self
-            .inner
-            .metadata
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        aggregator.observe(observation);
+        let Ok(mut aggregator) = self.inner.metadata.try_lock() else {
+            self.note_dropped("metadata", "metadata aggregator busy; dropping observation");
+            return;
+        };
+        if !aggregator.observe(observation) {
+            self.note_dropped("metadata", "metadata aggregator full; dropping observation");
+        }
     }
 
     pub fn dropped_total(&self) -> u64 {
@@ -172,21 +172,27 @@ impl EventReporter {
     pub fn render_metrics(&self) -> String {
         let dropped = self.dropped_total();
         format!(
-            "# HELP rustaccio_events_dropped_total Usage events dropped because the durable spool could not accept them.\n# TYPE rustaccio_events_dropped_total counter\nrustaccio_events_dropped_total {dropped}\n"
+            "# HELP rustaccio_events_dropped_total Usage events dropped because the pending queue could not accept them.\n# TYPE rustaccio_events_dropped_total counter\nrustaccio_events_dropped_total {dropped}\n"
         )
     }
 
     /// Stop the worker. Pending events stay on the spool for the next start.
     pub async fn shutdown(&self) {
         self.signal_shutdown();
-        if let Some(handle) = self.inner.worker.lock().await.take() {
-            let _ = handle.await;
+        for mut handle in self.inner.workers.lock().await.drain(..) {
+            if tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+            }
         }
     }
 
     fn signal_shutdown(&self) {
         self.inner.shutdown.store(true, Ordering::SeqCst);
         self.inner.notify.notify_waiters();
+        self.inner.stop.notify_one();
     }
 
     /// Guard held by the bridge. Dropping it stops the worker without waiting;
@@ -199,8 +205,7 @@ impl EventReporter {
     }
 
     fn note_dropped(&self, event_id: &str, message: &str) {
-        self.inner.dropped.fetch_add(1, Ordering::Relaxed);
-        warn!(event_id = %event_id, metric = "rustaccio_events_dropped_total", "{message}");
+        note_dropped(&self.inner, event_id, message);
     }
 
     pub fn event(
@@ -234,6 +239,78 @@ impl Drop for EventShutdown {
     fn drop(&mut self) {
         self.inner.shutdown.store(true, Ordering::SeqCst);
         self.inner.notify.notify_waiters();
+        self.inner.stop.notify_one();
+    }
+}
+
+// Only this writer waits for disk; requests never join its tasks. The bounded
+// channel caps memory even if a filesystem operation stops making progress.
+async fn spool_writer(
+    inner: Arc<ReporterInner>,
+    mut receiver: mpsc::Receiver<ManagedEvent>,
+    config: EventReporterConfig,
+) {
+    let max_bytes = config.max_bytes;
+    let spool = match config.spool_dir {
+        None => PendingEvents::memory(max_bytes),
+        Some(dir) => {
+            match tokio::task::spawn_blocking(move || EventSpool::open(dir, max_bytes)).await {
+                Ok(Ok(spool)) => PendingEvents::Disk(spool),
+                Ok(Err(error)) => {
+                    warn!(%error, "event spool unavailable; using bounded memory");
+                    PendingEvents::memory(max_bytes)
+                }
+                Err(error) => {
+                    warn!(%error, "event spool task failed; using bounded memory");
+                    PendingEvents::memory(max_bytes)
+                }
+            }
+        }
+    };
+    let _ = inner.spool.set(spool.clone());
+    inner.notify.notify_one();
+    loop {
+        let event = if inner.shutdown.load(Ordering::SeqCst) {
+            receiver.close();
+            receiver.recv().await
+        } else {
+            tokio::select! {
+                event = receiver.recv() => event,
+                _ = inner.stop.notified() => continue,
+            }
+        };
+        let Some(event) = event else { break };
+        let event_id = event.event_id.clone();
+        let store = spool.clone();
+        match tokio::task::spawn_blocking(move || store.append(&event)).await {
+            Ok(Ok(AppendOutcome::Stored)) => inner.notify.notify_one(),
+            Ok(Ok(AppendOutcome::Dropped)) => note_dropped(
+                &inner,
+                &event_id,
+                "pending events full; dropping newest event",
+            ),
+            _ => note_dropped(
+                &inner,
+                &event_id,
+                "event spool write failed; dropping event",
+            ),
+        }
+    }
+}
+
+fn note_dropped(inner: &ReporterInner, event_id: &str, message: &str) {
+    let dropped = inner
+        .dropped
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    // Keep an outage from turning into one synchronous log write per request.
+    if dropped.is_power_of_two() {
+        warn!(
+            event_id,
+            dropped,
+            metric = "rustaccio_events_dropped_total",
+            "{message}"
+        );
     }
 }
 
@@ -296,7 +373,7 @@ async fn event_worker(inner: Arc<ReporterInner>) {
 }
 
 async fn read_pending(inner: &ReporterInner) -> Option<super::spool::PendingBatch> {
-    let spool = inner.spool.clone();
+    let spool = inner.spool.get()?.clone();
     let limit = inner.flush_batch;
     match tokio::task::spawn_blocking(move || spool.read_batch(limit)).await {
         Ok(Ok(batch)) => Some(batch),
@@ -312,7 +389,9 @@ async fn read_pending(inner: &ReporterInner) -> Option<super::spool::PendingBatc
 }
 
 async fn ack_pending(inner: &ReporterInner, end_offset: u64, generation: u64) -> bool {
-    let spool = inner.spool.clone();
+    let Some(spool) = inner.spool.get().cloned() else {
+        return false;
+    };
     match tokio::task::spawn_blocking(move || spool.ack(end_offset, generation)).await {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {
@@ -353,7 +432,10 @@ async fn spool_metadata(inner: &ReporterInner, events: Vec<ManagedEvent>) {
         return;
     }
     let count = events.len() as u64;
-    let spool = inner.spool.clone();
+    let Some(spool) = inner.spool.get().cloned() else {
+        inner.dropped.fetch_add(count, Ordering::Relaxed);
+        return;
+    };
     let appended = tokio::task::spawn_blocking(move || {
         let mut dropped = 0u64;
         for event in &events {
@@ -536,13 +618,16 @@ struct MetaTotals {
 }
 
 impl MetadataAggregator {
-    fn observe(&mut self, observation: MetadataObservation) {
+    fn observe(&mut self, observation: MetadataObservation) -> bool {
         let key = MetaKey {
             registry_id: observation.registry_id,
             credential_id: observation.credential_id,
             package: observation.package,
             minute_unix: observation.at.timestamp().div_euclid(60) * 60,
         };
+        if self.windows.len() >= MAX_METADATA_WINDOWS && !self.windows.contains_key(&key) {
+            return false;
+        }
         let entry = self.windows.entry(key).or_insert_with(|| MetaTotals {
             tenant_id: observation.tenant_id.clone(),
             count: 0,
@@ -554,6 +639,7 @@ impl MetadataAggregator {
         if observation.not_modified {
             entry.not_modified = entry.not_modified.saturating_add(1);
         }
+        true
     }
 
     /// Emit one event per window whose minute has ended.
@@ -600,6 +686,74 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
     use std::time::Duration;
+
+    async fn wait_for(ready: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !ready() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("event worker made progress");
+    }
+
+    #[tokio::test]
+    async fn absent_or_unusable_directory_uses_bounded_memory() {
+        let file = tempfile::NamedTempFile::new().expect("file");
+        for dir in [None, Some(file.path().to_path_buf())] {
+            let client =
+                Arc::new(ControlPlaneClient::new("http://127.0.0.1:1", "node").expect("client"));
+            let reporter = EventReporter::start(client, EventReporterConfig::new(dir, 1))
+                .await
+                .expect("startup succeeds");
+            reporter.report(sample("too-large")).await;
+            wait_for(|| reporter.dropped_total() == 1).await;
+            assert!(matches!(
+                reporter.inner.spool.get(),
+                Some(PendingEvents::Memory(_))
+            ));
+            reporter.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_writer_and_full_handoff_never_block_reporting() {
+        let client =
+            Arc::new(ControlPlaneClient::new("http://127.0.0.1:1", "node").expect("client"));
+        let reporter =
+            EventReporter::start(client, EventReporterConfig::new(None, 8 * 1024 * 1024))
+                .await
+                .expect("reporter");
+        wait_for(|| reporter.inner.spool.get().is_some()).await;
+        let Some(PendingEvents::Memory(state)) = reporter.inner.spool.get() else {
+            panic!("memory")
+        };
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let state = Arc::clone(state);
+        let blocked = tokio::task::spawn_blocking(move || {
+            let _guard = state.lock().expect("lock");
+            locked_tx.send(()).expect("ready");
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("released");
+        });
+        locked_rx.await.expect("locked");
+        let result = tokio::time::timeout(Duration::from_millis(100), async {
+            for _ in 0..INGRESS_CAPACITY + 2 {
+                reporter.report(sample("event")).await;
+            }
+        })
+        .await;
+        release_tx.send(()).expect("release");
+        blocked.await.expect("blocker");
+        assert!(result.is_ok(), "reporting must not await storage");
+        assert!(
+            reporter.dropped_total() > 0,
+            "bounded handoff drops instead of waiting"
+        );
+        reporter.shutdown().await;
+    }
 
     fn header_map(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -775,7 +929,7 @@ mod tests {
         let reporter = EventReporter::start(
             client,
             EventReporterConfig {
-                spool_dir: dir.path().to_path_buf(),
+                spool_dir: Some(dir.path().to_path_buf()),
                 max_bytes: bound,
                 flush_interval: Duration::from_secs(60),
                 flush_batch: 50,
@@ -784,13 +938,24 @@ mod tests {
         .await
         .expect("reporter");
         reporter.report(sample("evt-newest")).await;
+        wait_for(|| reporter.dropped_total() == 1).await;
         assert_eq!(reporter.dropped_total(), 1);
         assert!(
             reporter
                 .render_metrics()
                 .contains("rustaccio_events_dropped_total 1")
         );
-        let pending = reporter.inner.spool.pending_ids().expect("pending");
+        let pending: Vec<_> = reporter
+            .inner
+            .spool
+            .get()
+            .expect("spool")
+            .read_batch(50)
+            .expect("pending")
+            .events
+            .into_iter()
+            .map(|e| e.event_id)
+            .collect();
         assert_eq!(pending, vec!["evt-older".to_string()]);
         assert!(!pending.iter().any(|id| id == "evt-newest"));
         reporter.shutdown().await;
@@ -803,7 +968,7 @@ mod tests {
         let reporter = EventReporter::start(
             dead,
             EventReporterConfig {
-                spool_dir: dir.path().to_path_buf(),
+                spool_dir: Some(dir.path().to_path_buf()),
                 max_bytes: 8 * 1024 * 1024,
                 flush_interval: Duration::from_millis(50),
                 flush_batch: 50,
@@ -824,7 +989,7 @@ mod tests {
         let restarted = EventReporter::start(
             live,
             EventReporterConfig {
-                spool_dir: dir.path().to_path_buf(),
+                spool_dir: Some(dir.path().to_path_buf()),
                 max_bytes: 8 * 1024 * 1024,
                 flush_interval: Duration::from_millis(50),
                 flush_batch: 50,

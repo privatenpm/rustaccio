@@ -165,16 +165,21 @@ Completed transfers are reported through `POST /v1/events` with UUID v4 event
 IDs: `publish` after a committed finalize, `download` when a redirect is
 issued (`status: redirected`, bytes = the recorded tarball size) or a proxied
 stream completes (bytes actually streamed; `complete`, `partial` with `range`,
-or `aborted`). Each event is fsynced to an append-only spool
-(`RUSTACCIO_MANAGED_EVENT_SPOOL_DIR`, default `<data_dir>/managed-events`,
-bounded by `RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES`, default 64 MiB) before
-the enqueue returns. A background worker batches the spool (50 or 5s) and
-retries a failed batch — same `event_id`s — until the control plane answers
-2xx. Acknowledged batches are removed; a restart replays whatever is left.
-When the byte bound is hit the newest event is dropped and
-`rustaccio_events_dropped_total` is incremented (always present on the
-metrics endpoint, including zero). A spool failure does not fail the npm
-operation.
+or `aborted`). Request handling uses a nonblocking, bounded 1,024-event
+handoff to a background writer. Without `RUSTACCIO_MANAGED_EVENT_SPOOL_DIR`,
+pending events live in memory. Setting it to a persistent volume directory
+selects the append-only disk spool; the writer fsyncs before an event becomes
+durable. `RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES` bounds either backend by
+serialized event size (default 64 MiB).
+
+A separate sender batches pending events (50 or 5s) and retries failed batches
+with the same IDs until the control plane answers 2xx. Acknowledged events
+are removed; a disk spool replays after restart. A full handoff or pending
+queue drops the newest event and increments `rustaccio_events_dropped_total`.
+Disk write failures drop events; an unavailable directory at startup falls
+back to memory. Neither disk latency nor event submission delays requests.
+Shutdown gives background tasks a bounded opportunity to drain; a crash can
+lose events waiting in the handoff and all memory-only events.
 
 Download and publish events carry the optional transfer context when known:
 `registry_id`, `format` (`npm`), `file`, `declared_bytes`, `status`, `range`,
