@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18.6-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-rustaccio}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -13,10 +13,10 @@ services:
       timeout: 2s
       retries: 30
     volumes:
-      - rustaccio-postgres-data:/var/lib/postgresql/data
+      - rustaccio-postgres-data:/var/lib/postgresql
 
   redis:
-    image: redis:7-alpine
+    image: redis:8.10.3-alpine
     ports:
       - "56379:6379"
     healthcheck:

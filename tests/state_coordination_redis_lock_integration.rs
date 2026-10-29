@@ -23,10 +23,13 @@ fn redis_it_url() -> String {
 }
 
 async fn coordinator() -> StateWriteCoordinator {
-    let url = redis_it_url();
+    coordinator_with(&redis_it_url(), false).await
+}
+
+async fn coordinator_with(url: &str, fail_open: bool) -> StateWriteCoordinator {
     unsafe {
         std::env::set_var("RUSTACCIO_STATE_COORDINATION_BACKEND", "redis");
-        std::env::set_var("RUSTACCIO_STATE_COORDINATION_REDIS_URL", &url);
+        std::env::set_var("RUSTACCIO_STATE_COORDINATION_REDIS_URL", url);
         std::env::set_var(
             "RUSTACCIO_STATE_COORDINATION_LOCK_KEY",
             "rustaccio:test:lock",
@@ -34,7 +37,10 @@ async fn coordinator() -> StateWriteCoordinator {
         // Keep the contention check fast (clamped minimum is 1000ms).
         std::env::set_var("RUSTACCIO_STATE_COORDINATION_ACQUIRE_TIMEOUT_MS", "1000");
         std::env::set_var("RUSTACCIO_STATE_COORDINATION_POLL_INTERVAL_MS", "50");
-        std::env::set_var("RUSTACCIO_STATE_COORDINATION_FAIL_OPEN", "false");
+        std::env::set_var(
+            "RUSTACCIO_STATE_COORDINATION_FAIL_OPEN",
+            if fail_open { "true" } else { "false" },
+        );
     }
     StateWriteCoordinator::from_env()
         .await
@@ -97,4 +103,33 @@ async fn redis_lock_serializes_same_scope() {
         })
         .await
         .expect("same scope acquirable after release");
+}
+
+#[tokio::test]
+async fn redis_unavailable_fail_open_runs_the_operation() {
+    let _guard = env_lock().lock().await;
+    let coordinator = coordinator_with("redis://127.0.0.1:1/", true).await;
+    let result = coordinator
+        .run_exclusive_scoped("unavailable", "publish", || async {
+            Ok::<_, RegistryError>(42)
+        })
+        .await;
+    assert_eq!(result.expect("fail-open operation"), 42);
+}
+
+#[tokio::test]
+async fn redis_unavailable_fail_closed_never_runs_the_operation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let _guard = env_lock().lock().await;
+    let coordinator = coordinator_with("redis://127.0.0.1:1/", false).await;
+    let called = AtomicBool::new(false);
+    let result = coordinator
+        .run_exclusive_scoped("unavailable", "publish", || async {
+            called.store(true, Ordering::SeqCst);
+            Ok::<_, RegistryError>(())
+        })
+        .await;
+    assert!(result.is_err(), "backend outage must reject the write");
+    assert!(!called.load(Ordering::SeqCst));
 }

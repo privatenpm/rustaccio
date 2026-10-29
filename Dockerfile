@@ -1,17 +1,17 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28.0
 
 # Multi-arch builds use native cross-compilation, not QEMU emulation: the
 # builder stage always runs on the build host's platform and compiles for the
 # requested target platform. (QEMU-emulated single-core fat-LTO builds took
 # hours; cross-compiling runs at native speed.)
 
-FROM --platform=$BUILDPLATFORM rust:1-bookworm AS chef
+FROM --platform=$BUILDPLATFORM rust:1.99.1-trixie AS chef
 WORKDIR /app
 RUN apt-get update \
- && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
- && rm -rf /var/lib/apt/lists/*
-RUN rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
-RUN cargo install cargo-chef --locked
+ && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu=4:14.2.0-1 g++-aarch64-linux-gnu=4:14.2.0-1 \
+ && rm -rf /var/lib/apt/lists/* \
+ && rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+ && cargo install cargo-chef --version 0.1.78 --locked
 
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
@@ -62,7 +62,7 @@ RUN RUST_TARGET="$(cat /tmp/rust-target)"; \
 
 RUN mkdir -p /tmp/rustaccio-root/data
 
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 
 WORKDIR /var/lib/rustaccio
 

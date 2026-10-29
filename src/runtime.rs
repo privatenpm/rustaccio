@@ -13,7 +13,7 @@ use crate::{
     storage::{Store, StoreOptions},
     upstream::Upstream,
 };
-use axum::{body::Body, extract::Request, http::StatusCode};
+use axum::{body::Body, extract::Request, http::StatusCode, serve::ListenerExt};
 use hyper::body::Incoming;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
@@ -110,9 +110,13 @@ pub async fn run(
     if let Some(keep_alive_timeout_secs) = config.keep_alive_timeout_secs {
         serve_with_keep_alive_timeout(listener, app, keep_alive_timeout_secs).await
     } else {
+        let listener = listener.tap_io(|stream| {
+            if let Err(error) = stream.set_nodelay(true) {
+                tracing::warn!(%error, "failed to disable TCP Nagle buffering");
+            }
+        });
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
-            .tcp_nodelay(true)
             .await
             .map_err(|_| RegistryError::Internal)
     }

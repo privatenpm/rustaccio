@@ -54,5 +54,6 @@ governance-down:
 test-governance-it:
 	just _cargo "cargo test --features redis,postgres --test governance_redis_postgres_integration -- --nocapture"
 	just _cargo "cargo test --features redis,postgres --test governance_redis_postgres_integration -- --ignored --nocapture"
-	just _cargo "cargo test --features redis --test state_coordination_redis_integration -- --nocapture"
-	just _cargo "cargo test --features redis --test state_coordination_redis_integration -- --ignored --nocapture"
+	just _cargo "cargo test --features redis --test state_coordination_redis_lock_integration -- --nocapture"
+	just _cargo "cargo test --features redis --test state_coordination_redis_lock_integration -- --ignored --nocapture"
+	just _cargo "cargo test --features postgres --test state_coordination_postgres_integration -- --ignored --nocapture"

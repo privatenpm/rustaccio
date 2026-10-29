@@ -18,7 +18,7 @@ use crate::{
 use axum::http::StatusCode;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use chrono::{SecondsFormat, Utc};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{Map, Value, json};
 use std::{
     cmp::Ordering,
@@ -936,7 +936,7 @@ impl Store {
 
     fn random_token_hex(bytes: usize) -> String {
         let mut buf = vec![0_u8; bytes];
-        rand::thread_rng().fill_bytes(&mut buf);
+        rand::rng().fill_bytes(&mut buf);
         hex::encode(buf)
     }
 

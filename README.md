@@ -221,7 +221,8 @@ cargo test
 cargo test --features s3
 ```
 
-Run real S3-backend integration tests against a local, pinned S3 emulator:
+Run S3-backend integration tests against the pinned Moto S3 emulator (no account
+or license token required):
 
 ```bash
 just minio-up
@@ -229,7 +230,7 @@ just test-s3-it
 just minio-down
 ```
 
-Run Redis/Postgres governance integration tests:
+Run Redis 8/PostgreSQL 18 governance integration tests:
 
 ```bash
 just governance-up

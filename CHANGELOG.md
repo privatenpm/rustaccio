@@ -7,13 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-29
+
 ### Changed
 
+- Update all Rust dependency requirements to their latest stable releases and refresh the transitive dependency lockfile, including Axum 0.8, reqwest 0.13, Redis 1.8, rand 0.10, SHA-1/SHA-2 0.11 and OpenTelemetry 0.33. Adapt listener setup and random-byte generation to the updated APIs.
+- Refresh GitHub Actions, the Dockerfile frontend, Rust builder, cargo-chef, Debian runtime and PostgreSQL/Redis test images. Release publishing now waits for the Rust, S3 and governance checks.
+- Use Moto 5.2.5 for credential-free S3 integration tests; current LocalStack releases require a license token. Existing `minio-up`, `test-s3-it` and `minio-down` commands remain available.
 - Managed event reporting defaults to a bounded memory queue. An explicit `RUSTACCIO_MANAGED_EVENT_SPOOL_DIR` enables disk persistence. Requests no longer wait for spool writes; a bounded background handoff drops on saturation, and an unusable directory falls back to memory so event storage cannot prevent startup.
+
+### Fixed
+
+- Managed proxy downloads report usage when HTTP finishes a Content-Length response without polling stream EOF. Interrupted downloads report the bytes streamed with aborted status, and each response produces at most one event.
+
+## [0.14.0] - 2026-09-28
 
 ### Added
 
-- Managed usage events can be fsynced in the background to a durable spool (`RUSTACCIO_MANAGED_EVENT_SPOOL_DIR`, `RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES`) and retried with the same `event_id` until the control plane acknowledges them. A full spool drops the newest event and increments `rustaccio_events_dropped_total` instead of failing the npm operation.
+- Managed usage events are fsynced to a durable spool (`RUSTACCIO_MANAGED_EVENT_SPOOL_DIR`, `RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES`) and retried with the same `event_id` until the control plane acknowledges them. A full spool drops the newest event and increments `rustaccio_events_dropped_total` instead of failing the npm operation.
 - Managed download and publish events now carry the optional transfer context (`registry_id`, `format`, `file`, `declared_bytes`, `status`, `range`, trusted edge `client_ip`, `user_agent`, `npm_command`, `npm_session`, `ci`, `host`, `request_id`). `client_ip` is taken from `Fly-Client-IP` or `CF-Connecting-IP`; client-supplied `X-Forwarded-For` is ignored.
 - Packument cache hits are aggregated per registry, credential, package and minute and reported as `kind: "metadata"` events (`count`, `bytes`, `not_modified`).
 - An authorize answer of `route: "upstream"` reverse-proxies the original request to the control-plane npm surface, preserving `Host` and `Authorization`. An absent or `hosted` route keeps the previous 404. Uplinks stay disabled in managed mode.
@@ -26,8 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the unused `argon2` and `password-hash` dependencies (leftovers from the local auth backend removed in 0.10.0).
 
 ### Fixed
-
-- Managed proxy downloads report usage when HTTP finishes a Content-Length response without polling stream EOF. Interrupted downloads report the bytes streamed with aborted status, and each response produces at most one event.
 
 - S3 integration tests use a pinned LocalStack community image after the old MinIO image stopped permitting public pulls.
 - The mode preset files `.env.local.example`, `.env.s3.example` and `.env.managed.example` no longer reference the removed `RUSTACCIO_AUTH_BACKEND=local`, `RUSTACCIO_AUTH_EXTERNAL_MODE` and `RUSTACCIO_AUTH_TOKEN_TTL_SECS` settings, and a mangled line in `.env.s3.example` was repaired.

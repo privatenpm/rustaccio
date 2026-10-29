@@ -194,7 +194,6 @@ async fn redis_rate_limiter_enforces_limit() {
     let postgres_url = postgres_it_url();
     wait_for_redis(&redis_url).await;
     wait_for_postgres(&postgres_url).await;
-    reset_redis(&redis_url).await;
 
     with_env(
         &[
@@ -220,6 +219,7 @@ async fn redis_rate_limiter_enforces_limit() {
             ("RUSTACCIO_METRICS_BACKEND", Some("none")),
         ],
         async {
+            reset_redis(&redis_url).await;
             let auth = common::start_token_echo_auth().await;
             let dir = TempDir::new().expect("dir");
             let mut cfg = base_config(dir.path().to_path_buf());
@@ -355,7 +355,6 @@ async fn postgres_quota_migrations_and_limits_are_enforced() {
     let postgres_url = postgres_it_url();
     wait_for_redis(&redis_url).await;
     wait_for_postgres(&postgres_url).await;
-    reset_postgres(&postgres_url).await;
 
     with_env(
         &[
@@ -381,6 +380,7 @@ async fn postgres_quota_migrations_and_limits_are_enforced() {
             ("RUSTACCIO_METRICS_BACKEND", Some("none")),
         ],
         async {
+            reset_postgres(&postgres_url).await;
             let auth = common::start_token_echo_auth().await;
             let dir = TempDir::new().expect("dir");
             let mut cfg = base_config(dir.path().to_path_buf());

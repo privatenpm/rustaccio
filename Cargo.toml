@@ -1,6 +1,6 @@
 [package]
 name = "rustaccio"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 default-run = "rustaccio"
@@ -18,46 +18,46 @@ otel = [
 ]
 
 [dependencies]
-async-trait = "0.1.89"
-aws-config = { version = "1.8.14", optional = true, default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
-aws-sdk-s3 = { version = "1.123.0", optional = true, default-features = false, features = ["sigv4a", "http-1x", "rustls", "rt-tokio"] }
-aws-smithy-http-client = { version = "1.1.10", optional = true, default-features = false, features = ["rustls-ring"] }
-axum = { version = "0.7.9", default-features = false, features = ["http1", "tokio", "json"] }
-base64 = "0.22.1"
-chrono = { version = "0.4.43", features = ["clock"] }
-futures = "0.3.31"
-config = { version = "0.15.11", default-features = false, features = ["yaml"] }
+async-trait = "0.1.92"
+aws-config = { version = "1.13.0", optional = true, default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
+aws-sdk-s3 = { version = "1.156.0", optional = true, default-features = false, features = ["sigv4a", "http-1x", "rustls", "rt-tokio"] }
+aws-smithy-http-client = { version = "1.5.2", optional = true, default-features = false, features = ["rustls-ring"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
+base64 = "0.23.1"
+chrono = { version = "0.4.45", features = ["clock"] }
+futures = "0.3.34"
+config = { version = "0.15.27", default-features = false, features = ["yaml"] }
 hex = "0.4.3"
-hyper = { version = "1.8.0", default-features = false, features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1.19", features = ["server-auto", "service", "tokio", "http1", "http2"] }
-rand = "0.8.5"
-reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
-sha1 = "0.10.6"
-redis = { version = "0.27.6", optional = true, default-features = false, features = ["tokio-comp", "script"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0.149", features = ["preserve_order"] }
+hyper = { version = "1.12.0", default-features = false, features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1.21", features = ["server-auto", "service", "tokio", "http1", "http2"] }
+rand = "0.10.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "stream"] }
+sha1 = "0.11.0"
+redis = { version = "1.8.0", optional = true, default-features = false, features = ["tokio-comp", "script"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 serde_yaml = "0.9.34"
-sha2 = "0.10.9"
-thiserror = "2.0.18"
-tokio = { version = "1.49.0", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-postgres = { version = "0.7.12", optional = true }
-tower-http = { version = "0.6.8", default-features = false, features = ["request-id", "trace", "limit", "timeout"] }
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-postgres = { version = "0.7.18", optional = true }
+tower-http = { version = "0.7.1", default-features = false, features = ["request-id", "trace", "limit", "timeout"] }
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
 tracing-error = "0.2.1"
-tracing-opentelemetry = { version = "0.29.0", optional = true }
-tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "json"] }
+tracing-opentelemetry = { version = "0.34.0", optional = true }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 urlencoding = "2.1.3"
-uuid = { version = "1.20.0", features = ["serde", "v4"] }
-opentelemetry = { version = "0.28.0", optional = true }
-opentelemetry-otlp = { version = "0.28.0", optional = true, features = ["http-proto", "reqwest-client"] }
-opentelemetry_sdk = { version = "0.28.0", optional = true, features = ["rt-tokio"] }
+uuid = { version = "1.29.0", features = ["serde", "v4"] }
+opentelemetry = { version = "0.33.1", optional = true }
+opentelemetry-otlp = { version = "0.33.1", optional = true, features = ["http-proto", "reqwest-client"] }
+opentelemetry_sdk = { version = "0.33.1", optional = true, features = ["rt-tokio"] }
 
 [dev-dependencies]
-flate2 = "1.1.5"
-http-body-util = "0.1.3"
-tar = "0.4.44"
-tempfile = "3.25.0"
+flate2 = "1.1.10"
+http-body-util = "0.1.5"
+tar = "0.4.46"
+tempfile = "3.27.0"
 wiremock = "0.6.5"
 
 [profile.dev]
