@@ -577,3 +577,137 @@ async fn absent_route_stays_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     control_plane.verify().await;
 }
+
+#[tokio::test]
+async fn proxy_download_over_http_reports_content_length_transfer_once() {
+    use std::time::Duration;
+
+    let control_plane = MockServer::start().await;
+    let storage = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/registry/v1/events"))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&control_plane)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/registry/v1/authorize"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(authorize_response(true, "")))
+        .mount(&control_plane)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/registry/v1/downloads/resolve"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "allowed": true,
+            "package": { "id": "npkg_1", "name": "demo", "registry_id": "reg_1",
+                "owner_tenant_id": "org_1", "visibility": "private", "revision": 3 },
+            "version": { "semver": "1.0.0", "tarball_bytes": 7 },
+            "credential_id": "ntok_1",
+            "download_url": format!("{}/tarball", storage.uri())
+        })))
+        .mount(&control_plane)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/tarball"))
+        .respond_with(|request: &wiremock::Request| {
+            if request.headers.contains_key(header::RANGE) {
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 1-3/7")
+                    .set_body_bytes(b"arb".to_vec())
+            } else {
+                ResponseTemplate::new(200).set_body_bytes(b"tarball".to_vec())
+            }
+        })
+        .mount(&storage)
+        .await;
+    let (app, _temp) = managed_app_with(&control_plane, |cfg| {
+        cfg.download_mode = DownloadMode::Proxy;
+    })
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/demo/-/demo-1.0.0.tgz");
+    let head = client
+        .head(&url)
+        .header(header::HOST, "npm.example.test")
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .expect("HEAD");
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(
+        head.headers().get(header::CONTENT_LENGTH).expect("length"),
+        "7"
+    );
+    assert!(head.bytes().await.expect("HEAD body").is_empty());
+    for partial in [false, true] {
+        let mut request = client
+            .get(&url)
+            .header(header::HOST, "npm.example.test")
+            .bearer_auth(TOKEN);
+        if partial {
+            request = request.header(header::RANGE, "bytes=1-3");
+        }
+        let response = request.send().await.expect("download");
+        assert_eq!(
+            response.status(),
+            if partial {
+                StatusCode::PARTIAL_CONTENT
+            } else {
+                StatusCode::OK
+            }
+        );
+        assert_eq!(response.content_length(), Some(if partial { 3 } else { 7 }));
+        assert_eq!(
+            response.bytes().await.expect("body").as_ref(),
+            if partial {
+                b"arb".as_slice()
+            } else {
+                b"tarball".as_slice()
+            }
+        );
+    }
+
+    let events = tokio::time::timeout(Duration::from_secs(7), async {
+        loop {
+            let requests = control_plane.received_requests().await.expect("requests");
+            let events: Vec<Value> = requests
+                .iter()
+                .filter(|request| request.url.path() == "/api/registry/v1/events")
+                .flat_map(|request| {
+                    request.body_json::<Value>().expect("events")["events"]
+                        .as_array()
+                        .expect("event array")
+                        .clone()
+                })
+                .collect();
+            if events.len() >= 2 {
+                break events;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    server.abort();
+    let events = events.expect("download must report usage over real HTTP");
+    assert_eq!(events.len(), 2, "GETs report once; HEAD never reports");
+    for status in ["complete", "partial"] {
+        let event = events
+            .iter()
+            .find(|event| event["status"] == status)
+            .expect("status");
+        assert_eq!(event["kind"], "download");
+        assert_eq!(event["bytes"], if status == "partial" { 3 } else { 7 });
+        assert_eq!(event["declared_bytes"], 7);
+        assert_eq!(event["package"], "demo");
+        assert_eq!(event["version"], "1.0.0");
+        assert_eq!(event["registry_id"], "reg_1");
+        assert_eq!(event["credential_id"], "ntok_1");
+        if status == "partial" {
+            assert_eq!(event["range"], json!({"start": 1, "end": 3}));
+        }
+    }
+}

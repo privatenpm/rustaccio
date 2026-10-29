@@ -165,8 +165,12 @@ Completed transfers are reported through `POST /v1/events` with UUID v4 event
 IDs: `publish` after a committed finalize, `download` when a redirect is
 issued (`status: redirected`, bytes = the recorded tarball size) or a proxied
 stream completes (bytes actually streamed; `complete`, `partial` with `range`,
-or `aborted`). Request handling uses a nonblocking, bounded 1,024-event
-handoff to a background writer. Without `RUSTACCIO_MANAGED_EVENT_SPOOL_DIR`,
+or `aborted`). A proxied body reports once on completion or drop, including when
+HTTP stops polling after `Content-Length` bytes. Dropping before the declared
+length, or before EOF when no length is known, reports `aborted` with the bytes
+already streamed. HEAD requests in proxy mode do not produce a download event.
+Request handling uses a nonblocking, bounded 1,024-event handoff to a background
+writer. Without `RUSTACCIO_MANAGED_EVENT_SPOOL_DIR`,
 pending events live in memory. Setting it to a persistent volume directory
 selects the append-only disk spool; the writer fsyncs before an event becomes
 durable. `RUSTACCIO_MANAGED_EVENT_SPOOL_MAX_BYTES` bounds either backend by

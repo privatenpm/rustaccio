@@ -20,6 +20,7 @@ use super::extract::{
     ExtractError, Extracted, PublishExtractor, PublishMetadata, ensure_no_attachment_data,
     publish_fingerprint,
 };
+use super::transfer::{DownloadStream, TransferReport};
 use super::{DownloadMode, ManagedState};
 use crate::api::{parse_canonical_dist_tags_path, parse_package_path};
 use crate::app::AppState;
@@ -34,7 +35,6 @@ use axum::{
 use futures::StreamExt;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 use tracing::warn;
 
@@ -918,9 +918,7 @@ async fn handle_download(input: DownloadInput) -> Result<Response<Body>, Registr
     };
 
     if managed.config.download_mode == DownloadMode::Redirect {
-        report
-            .emit(tarball_bytes, super::events::STATUS_REDIRECTED, None)
-            .await;
+        report.emit(tarball_bytes, super::events::STATUS_REDIRECTED, None);
         return Ok(Response::builder()
             .status(StatusCode::FOUND)
             .header(header::LOCATION, download_url)
@@ -974,20 +972,16 @@ async fn handle_download(input: DownloadInput) -> Result<Response<Body>, Registr
         .as_deref()
         .and_then(super::events::parse_content_range);
 
-    let transferred = Arc::new(AtomicU64::new(0));
-    let counter = Arc::clone(&transferred);
-    let counted = response.bytes_stream().map(move |chunk| {
-        if let Ok(bytes) = &chunk {
-            counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        }
-        chunk
-    });
-    let events_done = futures::stream::once(async move {
-        let bytes = transferred.load(Ordering::Relaxed);
-        report.emit(bytes, transfer_status, range).await;
-        Ok::<Bytes, reqwest::Error>(Bytes::new())
-    });
-    let body = Body::from_stream(counted.chain(events_done));
+    let expected_bytes = content_length
+        .as_deref()
+        .and_then(|value| value.parse().ok());
+    let body = Body::from_stream(DownloadStream::new(
+        response.bytes_stream(),
+        report,
+        expected_bytes,
+        transfer_status,
+        range,
+    ));
 
     let mut builder = Response::builder().status(status);
     if let Some(content_type) = content_type {
@@ -1002,53 +996,6 @@ async fn handle_download(input: DownloadInput) -> Result<Response<Body>, Registr
     Ok(builder
         .body(body)
         .unwrap_or_else(|_| Response::new(Body::empty())))
-}
-
-struct TransferReport {
-    events: super::events::EventReporter,
-    kind: &'static str,
-    tenant_id: Option<String>,
-    package: String,
-    version: Option<String>,
-    credential_id: Option<String>,
-    registry_id: String,
-    file: String,
-    declared_bytes: u64,
-    host: String,
-    request_id: String,
-    headers: HeaderMap,
-}
-
-impl TransferReport {
-    async fn emit(
-        self,
-        bytes: u64,
-        status: &'static str,
-        range: Option<super::client::EventRange>,
-    ) {
-        let mut event = super::events::EventReporter::event(
-            self.kind,
-            self.tenant_id.as_deref(),
-            &self.package,
-            self.version.as_deref(),
-            bytes,
-            self.credential_id.as_deref(),
-        );
-        super::events::apply_transfer(
-            &mut event,
-            super::events::TransferFacts {
-                registry_id: &self.registry_id,
-                file: &self.file,
-                declared_bytes: self.declared_bytes,
-                status,
-                range,
-                host: &self.host,
-                request_id: &self.request_id,
-                headers: &self.headers,
-            },
-        );
-        self.events.report(event).await;
-    }
 }
 
 /// Infer the exact version from a tarball filename (`name-1.2.3.tgz`).
@@ -1288,8 +1235,7 @@ async fn publish_inner(
         request_id: request_id.to_string(),
         headers: headers.clone(),
     }
-    .emit(tarball_bytes, super::events::STATUS_COMPLETE, None)
-    .await;
+    .emit(tarball_bytes, super::events::STATUS_COMPLETE, None);
     Ok(json_response(StatusCode::CREATED, body))
 }
 

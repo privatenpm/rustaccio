@@ -781,8 +781,11 @@ authorizes every private operation over HTTP, decodes/hashes publish bodies
 with bounded memory (spooling tarballs to disk), uploads them to
 control-plane issued create-only presigned URLs, reverse-proxies packument
 reads and metadata writes, redirects (or proxies) tarball downloads, and
-reports download/publish events from a bounded pending queue. An authorize answer
-of `route: "upstream"` is reverse-proxied to the control-plane npm surface
+reports download/publish events from a bounded pending queue. Proxy downloads report
+once when their response body completes or is dropped, including responses with
+`Content-Length`; early disconnects report the bytes streamed as `aborted`.
+An authorize answer of `route: "upstream"` is reverse-proxied to the control-plane
+npm surface
 (original `Host` and `Authorization`); an absent route stays 404, and
 uplinks stay disabled.
 

@@ -16,6 +16,7 @@ pub mod extract;
 pub mod fleet;
 mod pending;
 mod spool;
+mod transfer;
 
 use crate::config::{Config, TarballStorageBackend};
 use crate::error::RegistryError;

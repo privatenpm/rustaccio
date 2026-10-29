@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Managed proxy downloads report usage when HTTP finishes a Content-Length response without polling stream EOF. Interrupted downloads report the bytes streamed with aborted status, and each response produces at most one event.
+
 - S3 integration tests use a pinned LocalStack community image after the old MinIO image stopped permitting public pulls.
 - The mode preset files `.env.local.example`, `.env.s3.example` and `.env.managed.example` no longer reference the removed `RUSTACCIO_AUTH_BACKEND=local`, `RUSTACCIO_AUTH_EXTERNAL_MODE` and `RUSTACCIO_AUTH_TOKEN_TTL_SECS` settings, and a mangled line in `.env.s3.example` was repaired.
 - The startup error for an invalid `RUSTACCIO_METADATA_BACKEND` now names the valid values (`sidecar|managed`).

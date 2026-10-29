@@ -140,6 +140,11 @@ impl EventReporter {
     /// Enqueue without waiting for disk or the control plane. A full handoff
     /// drops the newest event. Durability begins only after the writer fsyncs.
     pub async fn report(&self, event: ManagedEvent) {
+        self.enqueue(event);
+    }
+
+    /// Synchronous handoff for response-body drop, which cannot await cleanup.
+    pub(super) fn enqueue(&self, event: ManagedEvent) {
         if self.inner.shutdown.load(Ordering::SeqCst) {
             self.note_dropped(&event.event_id, "event reporter stopping; dropping event");
         } else if let Err(error) = self.sender.try_send(event) {
