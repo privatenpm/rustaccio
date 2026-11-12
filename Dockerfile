@@ -62,7 +62,8 @@ RUN RUST_TARGET="$(cat /tmp/rust-target)"; \
 
 RUN mkdir -p /tmp/rustaccio-root/data
 
-FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
+# Includes Debian's zlib1g fixes for CVE-2026-76844 and CVE-2026-85091.
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab AS runtime
 
 WORKDIR /var/lib/rustaccio
 

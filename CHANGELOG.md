@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Pin the Debian 13 distroless runtime to an updated multi-platform digest containing zlib1g `1:1.3.dfsg+really1.3.1-1+deb13u1`, fixing CVE-2026-76844 and CVE-2026-85091 in the container's OS packages.
+
 ## [0.14.1] - 2026-10-29
 
 ### Changed
