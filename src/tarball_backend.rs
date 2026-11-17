@@ -40,7 +40,7 @@ impl TarballBackend {
         match config.tarball_storage.backend {
             TarballStorageBackend::Local => {
                 let root = config.data_dir.join("tarballs");
-                tokio::fs::create_dir_all(&root).await?;
+                crate::storage::create_startup_dir(&root).await?;
                 debug!(root = %root.display(), "initialized local tarball backend");
                 Ok(Self::Local(LocalTarballBackend::new(root)))
             }

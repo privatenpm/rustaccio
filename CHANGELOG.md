@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update dependencies to their latest compatible releases, the Rust builder image to 1.100.0, the Dockerfile frontend to 1.29.0 and the PostgreSQL test image to 18.7.
 - Read environment variables directly instead of through the `config` crate, which drops it and its YAML parser. Variable names are now matched exactly as documented (upper case); lower-case spellings such as `port` were previously accepted by accident and are no longer read.
 - Evict managed download and metadata cache entries in batches. A full 10k-entry download cache inserts in about 1.1 µs instead of 45 µs, and a mixed 20k-insert/300k-hit workload finishes in about 0.27 s instead of 1.3 s.
-- README: document every build feature, the master `edge` image tags, the publishing prerequisite in the Quick Start, `RUSTACCIO_STRICT_REVISION_CHECK` and the managed modules; fix the library embedding examples, which no longer compiled.
+- Startup failures to create the data, tarball or spool directory name the directory and the OS error instead of printing only "internal server error".
+- README: run the container with a named volume (the documented host bind mount was not writable by the image's non-root user, so the server exited at startup), document every build feature, the master `edge` image tags, the publishing prerequisite in the Quick Start, `RUSTACCIO_STRICT_REVISION_CHECK` and the managed modules; fix the library embedding examples, which no longer compiled.
 
 ## [0.14.1] - 2026-10-29
 

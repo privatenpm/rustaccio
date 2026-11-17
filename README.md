@@ -105,11 +105,15 @@ docker build \
   -t rustaccio:managed .
 
 docker run --rm -p 4873:4873 \
-  -v "$(pwd)/.rustaccio-data:/var/lib/rustaccio/data" \
+  -v rustaccio-data:/var/lib/rustaccio/data \
   -v "$(pwd)/config.yml:/etc/rustaccio/config.yml:ro" \
   -e RUSTACCIO_CONFIG=/etc/rustaccio/config.yml \
   rustaccio:local
 ```
+
+The image runs as the unprivileged user `65532:65532`. A named volume, as above, inherits that ownership. To keep data in a host directory instead, make the directory writable by that user (`sudo chown 65532:65532 ./.rustaccio-data`) or run the container with `--user "$(id -u):$(id -g)"`.
+
+The image sets `RUSTACCIO_BIND=0.0.0.0:4873` and `RUSTACCIO_DATA_DIR=/var/lib/rustaccio/data`; environment variables take precedence over `listen` and `storage` in the mounted config.
 
 The Docker image compiles `rustaccio` with `--features s3` by default.
 Override compile-time features with `--build-arg CARGO_FEATURES=...` when you need optional backends:

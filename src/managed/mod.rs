@@ -272,7 +272,7 @@ impl ManagedState {
                 "managed event spool directory must differ from the publish spool directory",
             ));
         }
-        tokio::fs::create_dir_all(&config.spool_dir).await?;
+        crate::storage::create_startup_dir(&config.spool_dir).await?;
         sweep_spool_dir(&config.spool_dir).await;
         let client = Arc::new(client::ControlPlaneClient::new(
             &config.control_plane_url,

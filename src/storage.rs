@@ -188,7 +188,7 @@ impl Store {
         options: StoreOptions,
     ) -> Result<Self, RegistryError> {
         Self::ensure_sidecar_metadata_authority()?;
-        tokio::fs::create_dir_all(&config.data_dir).await?;
+        create_startup_dir(&config.data_dir).await?;
         let tarball_backend = TarballBackend::from_config(config).await?;
         let state_coordinator = StateWriteCoordinator::from_env().await?;
         let metadata_backend = Self::metadata_backend_from_env()?;
@@ -2981,6 +2981,18 @@ fn managed_mode_enabled_from_env() -> bool {
         .unwrap_or(false)
 }
 
+/// Create a directory the server needs at startup. The error names the path
+/// and the OS error (for example a volume the server user cannot write),
+/// which a bare `RegistryError::Internal` would hide.
+pub(crate) async fn create_startup_dir(path: &std::path::Path) -> Result<(), RegistryError> {
+    tokio::fs::create_dir_all(path).await.map_err(|err| {
+        RegistryError::http(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot create directory {}: {err}", path.display()),
+        )
+    })
+}
+
 fn strict_revision_checks_from_env() -> bool {
     let default = managed_mode_enabled_from_env();
     std::env::var("RUSTACCIO_STRICT_REVISION_CHECK")
@@ -3031,6 +3043,20 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().expect("temp file");
         writeln!(file, "storage: {}", data_dir.display()).expect("write yaml config");
         Config::from_yaml_file(file.path().to_path_buf()).expect("parse config")
+    }
+
+    #[tokio::test]
+    async fn open_reports_the_data_dir_it_cannot_create() {
+        let blocker = tempfile::NamedTempFile::new().expect("temp file");
+        let data_dir = blocker.path().join("data");
+        let err = match Store::open(&config_for_data_dir(&data_dir)).await {
+            Ok(_) => panic!("a data dir under a regular file cannot be created"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains(&data_dir.display().to_string()),
+            "error should name the directory: {err}"
+        );
     }
 
     #[tokio::test]
