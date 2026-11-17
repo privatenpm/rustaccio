@@ -1,6 +1,7 @@
 use crate::acl::PackageRule;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde::Deserialize;
+use serde_json::Value;
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -529,16 +530,10 @@ fn load_yaml_config(path: &Path) -> Result<YamlConfig, String> {
 }
 
 fn load_yaml_config_from_str(source: &str, text: &str) -> Result<YamlConfig, String> {
-    let ordered_packages = serde_yaml::from_str::<YamlPackagesOnly>(text)
-        .ok()
-        .and_then(|value| value.packages);
-
-    let mut parsed = serde_yaml::from_str::<YamlConfig>(text)
-        .map_err(|err| format!("failed to parse {source}: {err}"))?;
-    if ordered_packages.is_some() {
-        parsed.packages = ordered_packages;
-    }
-    Ok(parsed)
+    // `packages` is a serde_json map, which keeps YAML key order (the
+    // `preserve_order` feature), so rule precedence follows the file.
+    serde_saphyr::from_str::<YamlConfig>(text)
+        .map_err(|err| format!("failed to parse {source}: {err}"))
 }
 
 fn load_rustaccio_env() -> RawEnvConfig {
@@ -668,8 +663,8 @@ fn parse_auth_from_yaml(auth: Option<YamlAuth>) -> Result<Option<HttpAuthPluginC
 }
 
 fn parse_storage_from_yaml(
-    storage: Option<&serde_yaml::Value>,
-    store: Option<serde_yaml::Value>,
+    storage: Option<&Value>,
+    store: Option<Value>,
 ) -> Result<TarballStorageConfig, String> {
     if let Some(store_value) = store
         && let Some(store_cfg) = parse_store_storage_config(store_value)?
@@ -683,27 +678,25 @@ fn parse_storage_from_yaml(
 }
 
 fn parse_storage_storage_config(
-    value: Option<&serde_yaml::Value>,
+    value: Option<&Value>,
 ) -> Result<Option<TarballStorageConfig>, String> {
     let Some(value) = value else {
         return Ok(None);
     };
-    if !value.is_mapping() {
+    if !value.is_object() {
         return Ok(None);
     }
-    let parsed = serde_yaml::from_value::<YamlStorage>(value.clone())
+    let parsed = serde_json::from_value::<YamlStorage>(value.clone())
         .map_err(|err| format!("invalid storage config: {err}"))?;
     Ok(Some(parse_storage_config(parsed)?))
 }
 
-fn parse_store_storage_config(
-    value: serde_yaml::Value,
-) -> Result<Option<TarballStorageConfig>, String> {
-    let Some(mapping) = value.as_mapping() else {
+fn parse_store_storage_config(value: Value) -> Result<Option<TarballStorageConfig>, String> {
+    let Some(mapping) = value.as_object() else {
         return Ok(None);
     };
-    if mapping.contains_key(serde_yaml::Value::String("backend".to_string())) {
-        let parsed = serde_yaml::from_value::<YamlStorage>(value)
+    if mapping.contains_key("backend") {
+        let parsed = serde_json::from_value::<YamlStorage>(value)
             .map_err(|err| format!("invalid store config: {err}"))?;
         return Ok(Some(parse_storage_config(parsed)?));
     }
@@ -741,10 +734,10 @@ fn parse_storage_config(storage: YamlStorage) -> Result<TarballStorageConfig, St
 #[derive(Debug, Deserialize)]
 struct YamlConfig {
     listen: Option<StringOrVec>,
-    storage: Option<serde_yaml::Value>,
-    store: Option<serde_yaml::Value>,
+    storage: Option<Value>,
+    store: Option<Value>,
     uplinks: Option<HashMap<String, YamlUplink>>,
-    packages: Option<serde_yaml::Mapping>,
+    packages: Option<serde_json::Map<String, Value>>,
     web: Option<YamlWeb>,
     publish: Option<YamlPublish>,
     middlewares: Option<YamlMiddlewares>,
@@ -753,11 +746,6 @@ struct YamlConfig {
     server: Option<YamlServer>,
     log: Option<YamlLog>,
     auth: Option<YamlAuth>,
-}
-
-#[derive(Debug, Deserialize)]
-struct YamlPackagesOnly {
-    packages: Option<serde_yaml::Mapping>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -813,7 +801,7 @@ struct YamlServer {
     #[serde(rename = "keepAliveTimeout")]
     keep_alive_timeout: Option<u64>,
     #[serde(rename = "trustProxy")]
-    trust_proxy: Option<serde_yaml::Value>,
+    trust_proxy: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -856,16 +844,8 @@ struct YamlPackageRule {
     proxy: Option<StringOrVec>,
 }
 
-fn parse_package_rule(
-    pattern: serde_yaml::Value,
-    value: serde_yaml::Value,
-) -> Result<PackageRule, String> {
-    let pattern = pattern
-        .as_str()
-        .ok_or_else(|| "invalid packages rule key".to_string())?
-        .to_string();
-
-    let parsed: YamlPackageRule = serde_yaml::from_value(value)
+fn parse_package_rule(pattern: String, value: Value) -> Result<PackageRule, String> {
+    let parsed: YamlPackageRule = serde_json::from_value(value)
         .map_err(|err| format!("invalid package rule {pattern}: {err}"))?;
 
     Ok(PackageRule {
@@ -925,9 +905,9 @@ fn parse_listen(listen: Option<&StringOrVec>, bind: &SocketAddr) -> Vec<String> 
     }
 }
 
-fn parse_data_dir(storage: Option<&serde_yaml::Value>) -> PathBuf {
+fn parse_data_dir(storage: Option<&Value>) -> PathBuf {
     storage
-        .and_then(serde_yaml::Value::as_str)
+        .and_then(Value::as_str)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".rustaccio-data"))
 }
@@ -974,11 +954,11 @@ fn normalize_url_prefix(value: &str) -> String {
     with_leading.trim_end_matches('/').to_string()
 }
 
-fn yaml_truthy(value: &serde_yaml::Value) -> bool {
+fn yaml_truthy(value: &Value) -> bool {
     match value {
-        serde_yaml::Value::Bool(v) => *v,
-        serde_yaml::Value::Number(n) => n.as_i64().is_some_and(|v| v != 0),
-        serde_yaml::Value::String(s) => !s.trim().is_empty() && s != "false" && s != "0",
+        Value::Bool(v) => *v,
+        Value::Number(n) => n.as_i64().is_some_and(|v| v != 0),
+        Value::String(s) => !s.trim().is_empty() && s != "false" && s != "0",
         _ => false,
     }
 }

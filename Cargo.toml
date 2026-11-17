@@ -35,7 +35,7 @@ sha1 = "0.11.0"
 redis = { version = "1.8.2", optional = true, default-features = false, features = ["tokio-comp", "script"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
-serde_yaml = "0.9.34"
+serde-saphyr = { version = "2.1.1", default-features = false, features = ["deserialize"] }
 sha2 = "0.11.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
