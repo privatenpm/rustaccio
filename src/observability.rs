@@ -1,4 +1,3 @@
-use config::{Config as SettingsLoader, Environment};
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 #[cfg(feature = "otel")]
@@ -204,14 +203,7 @@ fn with_noisy_dependency_guards(filter: String) -> String {
 }
 
 fn load_env_value(key: &str) -> Option<String> {
-    let settings = SettingsLoader::builder()
-        .add_source(Environment::default().try_parsing(false))
-        .build()
-        .ok()?;
-    settings
-        .get_string(key)
-        .ok()
-        .or_else(|| settings.get_string(&key.to_ascii_lowercase()).ok())
+    std::env::var(key).ok()
 }
 
 fn has_target_directive(filter: &str, target: &str) -> bool {

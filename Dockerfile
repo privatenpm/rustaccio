@@ -1,11 +1,11 @@
-# syntax=docker/dockerfile:1.28.0
+# syntax=docker/dockerfile:1.29.0
 
 # Multi-arch builds use native cross-compilation, not QEMU emulation: the
 # builder stage always runs on the build host's platform and compiles for the
 # requested target platform. (QEMU-emulated single-core fat-LTO builds took
 # hours; cross-compiling runs at native speed.)
 
-FROM --platform=$BUILDPLATFORM rust:1.99.1-trixie AS chef
+FROM --platform=$BUILDPLATFORM rust:1.100.0-trixie AS chef
 WORKDIR /app
 RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu=4:14.2.0-1 g++-aarch64-linux-gnu=4:14.2.0-1 \

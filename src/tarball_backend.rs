@@ -7,8 +7,6 @@ use crate::{
 #[cfg(feature = "s3")]
 use aws_sdk_s3::error::{DisplayErrorContext, ProvideErrorMetadata};
 use axum::http::StatusCode;
-#[cfg(feature = "s3")]
-use config::{Config as SettingsLoader, Environment};
 use serde_json::Value;
 #[cfg(feature = "s3")]
 use std::collections::HashSet;
@@ -1041,14 +1039,7 @@ fn load_s3_ca_bundle_pem() -> Result<Option<Vec<u8>>, RegistryError> {
 
 #[cfg(feature = "s3")]
 fn load_env_value(key: &str) -> Option<String> {
-    let settings = SettingsLoader::builder()
-        .add_source(Environment::default().try_parsing(false))
-        .build()
-        .ok()?;
-    settings
-        .get_string(key)
-        .ok()
-        .or_else(|| settings.get_string(&key.to_ascii_lowercase()).ok())
+    std::env::var(key).ok()
 }
 
 #[cfg(feature = "s3")]

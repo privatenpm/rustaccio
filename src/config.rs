@@ -1,6 +1,5 @@
 use crate::acl::PackageRule;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use config::{Config as SettingsLoader, Environment};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -124,22 +123,22 @@ struct RawEnvConfig {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let env_cfg = load_rustaccio_env()?;
+        let env_cfg = load_rustaccio_env();
         let mut cfg = Self::defaults();
         cfg.apply_env_config_sources_if_present(&env_cfg)?;
         cfg.apply_env_overrides(&env_cfg)?;
-        cfg.apply_port_override(load_process_env_value("port")?);
+        cfg.apply_port_override(env_value_for_var("PORT"));
         cfg.ensure_default_uplink();
         Ok(cfg)
     }
 
     pub fn from_env_with_config_file(config_path: PathBuf) -> Result<Self, String> {
-        let env_cfg = load_rustaccio_env()?;
+        let env_cfg = load_rustaccio_env();
         let mut cfg = Self::defaults();
         cfg.apply_env_config_sources_if_present(&env_cfg)?;
         cfg.apply_yaml_overrides(Self::from_yaml_file(config_path)?);
         cfg.apply_env_overrides(&env_cfg)?;
-        cfg.apply_port_override(load_process_env_value("port")?);
+        cfg.apply_port_override(env_value_for_var("PORT"));
         cfg.ensure_default_uplink();
         Ok(cfg)
     }
@@ -542,78 +541,50 @@ fn load_yaml_config_from_str(source: &str, text: &str) -> Result<YamlConfig, Str
     Ok(parsed)
 }
 
-fn load_rustaccio_env() -> Result<RawEnvConfig, String> {
-    let settings = SettingsLoader::builder()
-        .add_source(Environment::with_prefix("RUSTACCIO").try_parsing(false))
-        .build()
-        .map_err(|err| format!("failed to load RUSTACCIO_* environment: {err}"))?;
-
-    Ok(RawEnvConfig {
-        config: env_value_for_var(&settings, "RUSTACCIO_CONFIG"),
-        config_base64: env_value_for_var(&settings, "RUSTACCIO_CONFIG_BASE64"),
-        bind: env_value_for_var(&settings, "RUSTACCIO_BIND"),
-        data_dir: env_value_for_var(&settings, "RUSTACCIO_DATA_DIR"),
-        upstream: env_value_for_var(&settings, "RUSTACCIO_UPSTREAM"),
-        web_enable: env_value_for_var(&settings, "RUSTACCIO_WEB_ENABLE"),
-        web_title: env_value_for_var(&settings, "RUSTACCIO_WEB_TITLE"),
-        publish_check_owners: env_value_for_var(&settings, "RUSTACCIO_PUBLISH_CHECK_OWNERS"),
-        max_body_size: env_value_for_var(&settings, "RUSTACCIO_MAX_BODY_SIZE"),
-        audit_enabled: env_value_for_var(&settings, "RUSTACCIO_AUDIT_ENABLED"),
-        url_prefix: env_value_for_var(&settings, "RUSTACCIO_URL_PREFIX"),
-        trust_proxy: env_value_for_var(&settings, "RUSTACCIO_TRUST_PROXY"),
-        keep_alive_timeout: env_value_for_var(&settings, "RUSTACCIO_KEEP_ALIVE_TIMEOUT"),
-        log_level: env_value_for_var(&settings, "RUSTACCIO_LOG_LEVEL"),
-        auth_backend: env_value_for_var(&settings, "RUSTACCIO_AUTH_BACKEND"),
-        auth_http_base_url: env_value_for_var(&settings, "RUSTACCIO_AUTH_HTTP_BASE_URL"),
+fn load_rustaccio_env() -> RawEnvConfig {
+    RawEnvConfig {
+        config: env_value_for_var("RUSTACCIO_CONFIG"),
+        config_base64: env_value_for_var("RUSTACCIO_CONFIG_BASE64"),
+        bind: env_value_for_var("RUSTACCIO_BIND"),
+        data_dir: env_value_for_var("RUSTACCIO_DATA_DIR"),
+        upstream: env_value_for_var("RUSTACCIO_UPSTREAM"),
+        web_enable: env_value_for_var("RUSTACCIO_WEB_ENABLE"),
+        web_title: env_value_for_var("RUSTACCIO_WEB_TITLE"),
+        publish_check_owners: env_value_for_var("RUSTACCIO_PUBLISH_CHECK_OWNERS"),
+        max_body_size: env_value_for_var("RUSTACCIO_MAX_BODY_SIZE"),
+        audit_enabled: env_value_for_var("RUSTACCIO_AUDIT_ENABLED"),
+        url_prefix: env_value_for_var("RUSTACCIO_URL_PREFIX"),
+        trust_proxy: env_value_for_var("RUSTACCIO_TRUST_PROXY"),
+        keep_alive_timeout: env_value_for_var("RUSTACCIO_KEEP_ALIVE_TIMEOUT"),
+        log_level: env_value_for_var("RUSTACCIO_LOG_LEVEL"),
+        auth_backend: env_value_for_var("RUSTACCIO_AUTH_BACKEND"),
+        auth_http_base_url: env_value_for_var("RUSTACCIO_AUTH_HTTP_BASE_URL"),
         auth_http_request_auth_endpoint: env_value_for_var(
-            &settings,
             "RUSTACCIO_AUTH_HTTP_REQUEST_AUTH_ENDPOINT",
         ),
         auth_http_allow_access_endpoint: env_value_for_var(
-            &settings,
             "RUSTACCIO_AUTH_HTTP_ALLOW_ACCESS_ENDPOINT",
         ),
         auth_http_allow_publish_endpoint: env_value_for_var(
-            &settings,
             "RUSTACCIO_AUTH_HTTP_ALLOW_PUBLISH_ENDPOINT",
         ),
         auth_http_allow_unpublish_endpoint: env_value_for_var(
-            &settings,
             "RUSTACCIO_AUTH_HTTP_ALLOW_UNPUBLISH_ENDPOINT",
         ),
-        auth_http_timeout_ms: env_value_for_var(&settings, "RUSTACCIO_AUTH_HTTP_TIMEOUT_MS"),
-        tarball_backend: env_value_for_var(&settings, "RUSTACCIO_TARBALL_BACKEND"),
-        s3_bucket: env_value_for_var(&settings, "RUSTACCIO_S3_BUCKET"),
-        s3_region: env_value_for_var(&settings, "RUSTACCIO_S3_REGION"),
-        s3_endpoint: env_value_for_var(&settings, "RUSTACCIO_S3_ENDPOINT"),
-        s3_access_key_id: env_value_for_var(&settings, "RUSTACCIO_S3_ACCESS_KEY_ID"),
-        s3_secret_access_key: env_value_for_var(&settings, "RUSTACCIO_S3_SECRET_ACCESS_KEY"),
-        s3_prefix: env_value_for_var(&settings, "RUSTACCIO_S3_PREFIX"),
-        s3_force_path_style: env_value_for_var(&settings, "RUSTACCIO_S3_FORCE_PATH_STYLE"),
-    })
+        auth_http_timeout_ms: env_value_for_var("RUSTACCIO_AUTH_HTTP_TIMEOUT_MS"),
+        tarball_backend: env_value_for_var("RUSTACCIO_TARBALL_BACKEND"),
+        s3_bucket: env_value_for_var("RUSTACCIO_S3_BUCKET"),
+        s3_region: env_value_for_var("RUSTACCIO_S3_REGION"),
+        s3_endpoint: env_value_for_var("RUSTACCIO_S3_ENDPOINT"),
+        s3_access_key_id: env_value_for_var("RUSTACCIO_S3_ACCESS_KEY_ID"),
+        s3_secret_access_key: env_value_for_var("RUSTACCIO_S3_SECRET_ACCESS_KEY"),
+        s3_prefix: env_value_for_var("RUSTACCIO_S3_PREFIX"),
+        s3_force_path_style: env_value_for_var("RUSTACCIO_S3_FORCE_PATH_STYLE"),
+    }
 }
 
-fn load_process_env_value(key: &str) -> Result<Option<String>, String> {
-    let settings = SettingsLoader::builder()
-        .add_source(Environment::default().try_parsing(false))
-        .build()
-        .map_err(|err| format!("failed to load process environment: {err}"))?;
-    Ok(env_value(&settings, key))
-}
-
-fn env_value(settings: &SettingsLoader, key: &str) -> Option<String> {
-    settings
-        .get_string(key)
-        .ok()
-        .or_else(|| settings.get_string(&key.to_ascii_uppercase()).ok())
-}
-
-fn env_value_for_var(settings: &SettingsLoader, env_var: &str) -> Option<String> {
-    let key = env_var
-        .strip_prefix("RUSTACCIO_")
-        .unwrap_or(env_var)
-        .to_ascii_lowercase();
-    env_value(settings, &key)
+fn env_value_for_var(env_var: &str) -> Option<String> {
+    std::env::var(env_var).ok()
 }
 
 fn parse_env_value<T>(raw: Option<&str>) -> Option<T>

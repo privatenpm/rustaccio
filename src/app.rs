@@ -8,7 +8,6 @@ use axum::{
     http::{HeaderName, Response, StatusCode},
     routing::any,
 };
-use config::{Config as SettingsLoader, Environment};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tower_http::{
     limit::RequestBodyLimitLayer,
@@ -153,14 +152,7 @@ fn parse_request_timeout_secs(raw: Option<&str>) -> u64 {
 }
 
 fn load_env_value(key: &str) -> Option<String> {
-    let settings = SettingsLoader::builder()
-        .add_source(Environment::default().try_parsing(false))
-        .build()
-        .ok()?;
-    settings
-        .get_string(key)
-        .ok()
-        .or_else(|| settings.get_string(&key.to_ascii_lowercase()).ok())
+    std::env::var(key).ok()
 }
 
 fn parse_bool_env(key: &str, default: bool) -> Option<bool> {

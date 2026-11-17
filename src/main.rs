@@ -3,7 +3,6 @@
 // recursion limit on recent toolchains; raise it for the binary crate.
 #![recursion_limit = "256"]
 
-use config::{Config as SettingsLoader, Environment};
 use rustaccio::{
     config::Config,
     runtime::{run_from_env, run_standalone},
@@ -67,14 +66,7 @@ fn parse_usize_or_default(raw: Option<&str>, default: usize, min: usize, max: us
 }
 
 fn load_env_value(key: &str) -> Option<String> {
-    let settings = SettingsLoader::builder()
-        .add_source(Environment::default().try_parsing(false))
-        .build()
-        .ok()?;
-    settings
-        .get_string(key)
-        .ok()
-        .or_else(|| settings.get_string(&key.to_ascii_lowercase()).ok())
+    std::env::var(key).ok()
 }
 
 fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {

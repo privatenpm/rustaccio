@@ -1,6 +1,5 @@
 use crate::{constants::API_ERROR_SERVER_TIME_OUT, error::RegistryError};
 use axum::http::{Method, StatusCode};
-use config::{Config as SettingsLoader, Environment};
 use reqwest::{Client, redirect::Policy};
 use serde_json::Value;
 use std::{sync::OnceLock, time::Duration};
@@ -355,14 +354,7 @@ fn env_usize(key: &str, default: usize, min: usize, max: usize) -> usize {
 }
 
 fn load_env_value(key: &str) -> Option<String> {
-    let settings = SettingsLoader::builder()
-        .add_source(Environment::default().try_parsing(false))
-        .build()
-        .ok()?;
-    settings
-        .get_string(key)
-        .ok()
-        .or_else(|| settings.get_string(&key.to_ascii_lowercase()).ok())
+    std::env::var(key).ok()
 }
 
 fn map_uplink_request_err(err: reqwest::Error) -> RegistryError {
