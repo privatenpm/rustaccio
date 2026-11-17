@@ -17,6 +17,34 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Drop expired entries and, when the map is still over `max_entries`, evict
+/// the soonest-expiring entries down to 90% of the limit. Evicting a batch
+/// keeps the amortized cost per insert constant instead of rescanning the
+/// whole map on every insert once it is full.
+fn evict_to_capacity<K, V>(
+    entries: &mut HashMap<K, V>,
+    max_entries: usize,
+    now: i64,
+    expires_at_ms: impl Fn(&V) -> i64,
+) where
+    K: Clone + Eq + std::hash::Hash,
+{
+    entries.retain(|_, entry| expires_at_ms(entry) > now);
+    if entries.len() <= max_entries {
+        return;
+    }
+    let keep = max_entries - max_entries / 10;
+    let mut by_expiry = entries
+        .iter()
+        .map(|(key, entry)| (expires_at_ms(entry), key.clone()))
+        .collect::<Vec<_>>();
+    let evict = by_expiry.len() - keep;
+    by_expiry.select_nth_unstable_by_key(evict - 1, |(expires, _)| *expires);
+    for (_, key) in by_expiry.into_iter().take(evict) {
+        entries.remove(&key);
+    }
+}
+
 /// Parse an RFC3339 timestamp into epoch milliseconds.
 pub fn parse_rfc3339_ms(raw: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(raw)
@@ -116,13 +144,24 @@ impl DecisionCache {
                 expires_at_ms,
             },
         );
-        Self::prune_locked(
-            &mut entries,
-            self.max_entries,
-            &self.last_prune_ms,
-            self.prune_interval_ms,
-            now,
-        );
+        let last = self.last_prune_ms.load(Ordering::Relaxed);
+        let interval_elapsed = last == 0 || now.saturating_sub(last) >= self.prune_interval_ms;
+        if entries.len() > self.max_entries || interval_elapsed {
+            evict_to_capacity(&mut entries, self.max_entries, now, |entry| {
+                entry.expires_at_ms
+            });
+            // Forget versions of tokens that no longer have entries, so a
+            // flood of distinct (for example invalid) tokens stays bounded.
+            let mut versions = self.credential_versions.write().await;
+            if versions.len() > self.max_entries {
+                let live_tokens = entries
+                    .keys()
+                    .map(|key| key.token.as_str())
+                    .collect::<std::collections::HashSet<_>>();
+                versions.retain(|token, _| live_tokens.contains(token.as_str()));
+            }
+            self.last_prune_ms.store(now, Ordering::Relaxed);
+        }
     }
 
     pub async fn invalidate(&self) {
@@ -150,34 +189,6 @@ impl DecisionCache {
             package: scope.package.clone(),
             version: scope.version.clone(),
         }
-    }
-
-    fn prune_locked(
-        entries: &mut HashMap<DecisionKey, CachedDecision>,
-        max_entries: usize,
-        last_prune_ms: &AtomicI64,
-        prune_interval_ms: i64,
-        now: i64,
-    ) {
-        let last = last_prune_ms.load(Ordering::Relaxed);
-        if last > 0 && now.saturating_sub(last) < prune_interval_ms {
-            return;
-        }
-        entries.retain(|_, entry| entry.expires_at_ms > now);
-        if entries.len() > max_entries {
-            let mut by_expiry = entries
-                .iter()
-                .map(|(key, entry)| (key.clone(), entry.expires_at_ms))
-                .collect::<Vec<_>>();
-            by_expiry.sort_by_key(|(_, expires)| *expires);
-            for (key, _) in by_expiry
-                .into_iter()
-                .take(entries.len().saturating_sub(max_entries))
-            {
-                entries.remove(&key);
-            }
-        }
-        last_prune_ms.store(now, Ordering::Relaxed);
     }
 }
 
@@ -248,13 +259,9 @@ impl DownloadCache {
             },
         );
         if entries.len() > self.max_entries {
-            let oldest = entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.expires_at_ms)
-                .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                entries.remove(&oldest);
-            }
+            evict_to_capacity(&mut entries, self.max_entries, now, |entry| {
+                entry.expires_at_ms
+            });
         }
     }
 
@@ -324,13 +331,9 @@ impl MetadataCache {
         let mut entries = self.entries.write().await;
         entries.insert(Self::key(origin, path, abbreviated), entry);
         if entries.len() > self.max_entries {
-            let oldest = entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.expires_at_ms)
-                .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                entries.remove(&oldest);
-            }
+            evict_to_capacity(&mut entries, self.max_entries, now_ms(), |entry| {
+                entry.expires_at_ms
+            });
         }
     }
 
@@ -468,6 +471,49 @@ mod tests {
         cache.put(&scope(), &decision(false, None, 4)).await;
         let cached = cache.get(&scope()).await.expect("cached decision");
         assert!(!cached.allowed);
+    }
+
+    #[tokio::test]
+    async fn decision_cache_stays_bounded_under_a_flood_of_distinct_tokens() {
+        let cache = DecisionCache::new(100, 30_000);
+        for i in 0..1_000 {
+            let scope = DecisionScope {
+                token: format!("npm_flood_{i}"),
+                ..scope()
+            };
+            cache.put(&scope, &decision(false, None, 1)).await;
+        }
+        assert!(cache.entries.read().await.len() <= 100);
+        assert!(cache.credential_versions.read().await.len() <= 100);
+        let newest = DecisionScope {
+            token: "npm_flood_999".to_string(),
+            ..scope()
+        };
+        assert!(cache.get(&newest).await.is_some(), "newest entry survives");
+    }
+
+    #[tokio::test]
+    async fn download_cache_evicts_soonest_expiring_entries_first() {
+        let cache = DownloadCache::new(100, 3_600_000);
+        let response = |minutes: i64| DownloadResolveResponse {
+            allowed: true,
+            expires_at: Some(
+                (chrono::Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339(),
+            ),
+            package: None,
+            version: None,
+            download_url: Some("https://example.com/file.tgz".to_string()),
+            credential_id: None,
+        };
+        cache.put("tok", "host", "pkg", "short", &response(1)).await;
+        for i in 0..100 {
+            cache
+                .put("tok", "host", "pkg", &format!("1.0.{i}"), &response(30))
+                .await;
+        }
+        assert!(cache.entries.read().await.len() <= 100);
+        assert!(cache.get("tok", "host", "pkg", "short").await.is_none());
+        assert!(cache.get("tok", "host", "pkg", "1.0.99").await.is_some());
     }
 
     #[tokio::test]
