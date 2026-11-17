@@ -4,7 +4,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use axum::http::StatusCode;
-use chrono::Utc;
 #[cfg(feature = "postgres")]
 use tokio_postgres::NoTls;
 use tracing::{debug, error};
@@ -477,7 +476,7 @@ impl GovernanceGuard for InMemoryRateLimiter {
         }
 
         let key = governance_key(ctx);
-        let now_ms = Utc::now().timestamp_millis();
+        let now_ms = jiff::Timestamp::now().as_millisecond();
         let window_ms = (self.window_secs as i64) * 1000;
         let mut windows = self.windows.lock().await;
         if windows.len() >= self.max_keys && !windows.contains_key(&key) {
@@ -547,12 +546,17 @@ impl GovernanceGuard for InMemoryQuotaGuard {
         }
 
         let tenant_key = tenant_key(ctx);
-        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let day = jiff::Timestamp::now().strftime("%Y-%m-%d").to_string();
         let mut usage = self.usage.lock().await;
-        let oldest_allowed_day = (Utc::now().date_naive()
-            - chrono::Days::new(self.retention_days.saturating_sub(1)))
-        .format("%Y-%m-%d")
-        .to_string();
+        let oldest_allowed_day = jiff::Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_hours(
+                i64::try_from(self.retention_days.saturating_sub(1))
+                    .unwrap_or(i64::MAX / 3600)
+                    .saturating_mul(24),
+            ))
+            .unwrap_or(jiff::Timestamp::MIN)
+            .strftime("%Y-%m-%d")
+            .to_string();
         usage.retain(|(entry_day, _, _), _| entry_day >= &oldest_allowed_day);
         if usage.len() >= self.max_keys {
             let mut keys = usage.keys().cloned().collect::<Vec<_>>();
@@ -711,7 +715,7 @@ impl GovernanceGuard for PostgresQuotaGuard {
             return Ok(());
         }
 
-        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let day = jiff::Timestamp::now().strftime("%Y-%m-%d").to_string();
         let tenant_key = tenant_key(ctx);
         let row = self
             .client

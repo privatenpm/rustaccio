@@ -401,7 +401,7 @@ fn normalize_s3_prefix(prefix: &str) -> String {
 
 #[cfg(feature = "s3")]
 fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 fn env_value(key: &str) -> Option<String> {

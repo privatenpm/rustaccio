@@ -310,7 +310,7 @@ async fn state_coordination_s3_lock_timeout_when_key_is_held() {
     // Package writes coordinate on the per-package scope `package:<name>`; seed a
     // still-held lock at exactly that scope so the publish below cannot acquire it.
     let held_key = format!("{prefix}package:{pkg}.lock");
-    let lease_until_ms = chrono::Utc::now().timestamp_millis() + 10_000;
+    let lease_until_ms = jiff::Timestamp::now().as_millisecond() + 10_000;
     let payload = json!({
         "token": "held-token",
         "lease_until_ms": lease_until_ms,

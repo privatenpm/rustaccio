@@ -110,7 +110,7 @@ pub struct MetadataObservation {
     pub package: String,
     pub bytes: u64,
     pub not_modified: bool,
-    pub at: chrono::DateTime<chrono::Utc>,
+    pub at: jiff::Timestamp,
 }
 
 impl EventReporter {
@@ -229,7 +229,7 @@ impl EventReporter {
             version: version.map(ToOwned::to_owned),
             credential_id: credential_id.map(ToOwned::to_owned),
             bytes,
-            occurred_at: chrono::Utc::now().to_rfc3339(),
+            occurred_at: jiff::Timestamp::now().to_string(),
             ..ManagedEvent::default()
         }
     }
@@ -427,7 +427,7 @@ async fn flush_closed_metadata(inner: &ReporterInner) {
             .metadata
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        aggregator.flush_closed(chrono::Utc::now())
+        aggregator.flush_closed(jiff::Timestamp::now())
     };
     spool_metadata(inner, events).await;
 }
@@ -628,7 +628,7 @@ impl MetadataAggregator {
             registry_id: observation.registry_id,
             credential_id: observation.credential_id,
             package: observation.package,
-            minute_unix: observation.at.timestamp().div_euclid(60) * 60,
+            minute_unix: observation.at.as_second().div_euclid(60) * 60,
         };
         if self.windows.len() >= MAX_METADATA_WINDOWS && !self.windows.contains_key(&key) {
             return false;
@@ -648,8 +648,8 @@ impl MetadataAggregator {
     }
 
     /// Emit one event per window whose minute has ended.
-    fn flush_closed(&mut self, now: chrono::DateTime<chrono::Utc>) -> Vec<ManagedEvent> {
-        let current = now.timestamp().div_euclid(60) * 60;
+    fn flush_closed(&mut self, now: jiff::Timestamp) -> Vec<ManagedEvent> {
+        let current = now.as_second().div_euclid(60) * 60;
         let ready: Vec<MetaKey> = self
             .windows
             .keys()
@@ -667,7 +667,9 @@ impl MetadataAggregator {
 
     fn emit(&mut self, key: MetaKey) -> Option<ManagedEvent> {
         let totals = self.windows.remove(&key)?;
-        let occurred_at = chrono::DateTime::from_timestamp(key.minute_unix, 0)?.to_rfc3339();
+        let occurred_at = jiff::Timestamp::from_second(key.minute_unix)
+            .ok()?
+            .to_string();
         Some(ManagedEvent {
             event_id: uuid::Uuid::new_v4().to_string(),
             kind: EVENT_METADATA.to_string(),
@@ -866,10 +868,10 @@ mod tests {
     #[test]
     fn metadata_aggregation_emits_one_event_per_minute_window() {
         let mut aggregator = MetadataAggregator::default();
-        let minute = chrono::DateTime::parse_from_rfc3339("2026-09-27T12:00:30Z")
-            .expect("time")
-            .with_timezone(&chrono::Utc);
-        let next = minute + chrono::Duration::seconds(60);
+        let minute = "2026-09-27T12:00:30Z"
+            .parse::<jiff::Timestamp>()
+            .expect("time");
+        let next = minute + jiff::SignedDuration::from_secs(60);
         let observe = |aggregator: &mut MetadataAggregator, at, bytes, not_modified| {
             aggregator.observe(MetadataObservation {
                 tenant_id: "org_1".to_string(),
@@ -884,7 +886,7 @@ mod tests {
         observe(&mut aggregator, minute, 100, false);
         observe(
             &mut aggregator,
-            minute + chrono::Duration::seconds(10),
+            minute + jiff::SignedDuration::from_secs(10),
             50,
             true,
         );
@@ -899,7 +901,7 @@ mod tests {
         assert_eq!(closed[0].package, "demo");
         assert_eq!(closed[0].registry_id.as_deref(), Some("reg_1"));
         assert_eq!(closed[0].credential_id.as_deref(), Some("ntok_1"));
-        assert_eq!(closed[0].occurred_at, "2026-09-27T12:00:00+00:00");
+        assert_eq!(closed[0].occurred_at, "2026-09-27T12:00:00Z");
 
         let open = aggregator.flush_all();
         assert_eq!(open.len(), 1, "the next minute is its own event");

@@ -1,7 +1,6 @@
 use crate::{error::RegistryError, models::TenantContext};
 use async_trait::async_trait;
 use axum::http::StatusCode;
-use chrono::Utc;
 use reqwest::{Client, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,7 +29,7 @@ impl RegistryEvent {
     ) -> Self {
         Self {
             event_type: event_type.into(),
-            occurred_at: Utc::now().to_rfc3339(),
+            occurred_at: jiff::Timestamp::now().to_string(),
             actor,
             package,
             request_id,

@@ -81,7 +81,7 @@ fn authorize_response(allowed: bool, reason: &str) -> Value {
     json!({
         "allowed": allowed,
         "reason": reason,
-        "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+        "expires_at": (jiff::Timestamp::now() + jiff::SignedDuration::from_mins(5)).to_string(),
         "subject": {
             "kind": "publisher",
             "tenant_id": "org_1",
@@ -215,7 +215,7 @@ async fn publish_flows_through_reserve_upload_finalize() {
                 "document_id": "doc_1",
                 "url": format!("{}/upload/doc_1", control_plane.uri()),
                 "headers": {},
-                "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
+                "expires_at": (jiff::Timestamp::now() + jiff::SignedDuration::from_mins(5)).to_string()
             }
         })))
         .mount(&control_plane)
@@ -350,7 +350,7 @@ async fn tarball_get_redirects_to_the_resolved_url() {
         .and(path("/api/registry/v1/downloads/resolve"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "allowed": true,
-            "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            "expires_at": (jiff::Timestamp::now() + jiff::SignedDuration::from_mins(5)).to_string(),
             "package": {
                 "id": "npkg_1", "name": "demo", "registry_id": "reg_1",
                 "owner_tenant_id": "org_1", "visibility": "private", "revision": 3
@@ -416,7 +416,7 @@ async fn proxy_downloads_complete_while_event_submission_stalls_and_fails() {
         .and(path("/api/registry/v1/downloads/resolve"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "allowed": true,
-            "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            "expires_at": (jiff::Timestamp::now() + jiff::SignedDuration::from_mins(5)).to_string(),
             "package": { "id": "npkg_1", "name": "demo", "registry_id": "reg_1",
                 "owner_tenant_id": "org_1", "visibility": "private", "revision": 3 },
             "version": { "semver": "1.0.0", "tarball_bytes": 7 },

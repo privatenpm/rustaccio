@@ -6,7 +6,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use axum::http::StatusCode;
-use chrono::Utc;
 use reqwest::{Client, redirect::Policy};
 use serde_json::{Value, json};
 use std::{
@@ -385,7 +384,7 @@ impl HttpPolicyBackend {
     }
 
     async fn cached_decision(&self, key: &str) -> Option<bool> {
-        let now = Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let cache = self.cache.read().await;
         let entry = cache.get(key)?;
         if entry.expires_at_ms > now {
@@ -399,7 +398,7 @@ impl HttpPolicyBackend {
         if self.cfg.cache_ttl_ms == 0 {
             return;
         }
-        let expires_at_ms = Utc::now().timestamp_millis() + self.cfg.cache_ttl_ms as i64;
+        let expires_at_ms = jiff::Timestamp::now().as_millisecond() + self.cfg.cache_ttl_ms as i64;
         let mut cache = self.cache.write().await;
         cache.insert(
             key,
@@ -419,7 +418,7 @@ impl HttpPolicyBackend {
     }
 
     async fn prune_cache(&self, force: bool) {
-        let now_ms = Utc::now().timestamp_millis();
+        let now_ms = jiff::Timestamp::now().as_millisecond();
         if !force {
             let last_prune_ms = self.last_cache_prune_ms.load(Ordering::Relaxed);
             if last_prune_ms > 0

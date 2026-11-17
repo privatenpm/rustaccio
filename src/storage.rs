@@ -17,7 +17,6 @@ use crate::{
 };
 use axum::http::StatusCode;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use chrono::{SecondsFormat, Utc};
 use rand::Rng;
 use serde_json::{Map, Value, json};
 use std::{
@@ -237,7 +236,7 @@ impl Store {
     }
 
     fn now_ms() -> i64 {
-        Utc::now().timestamp_millis()
+        jiff::Timestamp::now().as_millisecond()
     }
 
     pub fn start_background_maintenance(self: &Arc<Self>) {
@@ -472,7 +471,9 @@ impl Store {
     }
 
     fn now_http() -> String {
-        Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string()
+        jiff::Timestamp::now()
+            .strftime("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
     }
 
     fn package_lock_scope(package_name: &str) -> String {
@@ -530,7 +531,7 @@ impl Store {
         ordered_packages.sort();
 
         let now_ms = Self::now_ms();
-        let now_rfc3339 = Utc::now().to_rfc3339();
+        let now_rfc3339 = jiff::Timestamp::now().to_string();
         let mut changed = false;
         let mut indexed_packages = 0usize;
         let mut indexed_versions = 0usize;
@@ -964,7 +965,7 @@ impl Store {
             return Ok(None);
         }
 
-        let now_rfc3339 = Utc::now().to_rfc3339();
+        let now_rfc3339 = jiff::Timestamp::now().to_string();
         let mut manifest = package_metadata
             .clone()
             .filter(Value::is_object)
@@ -1367,7 +1368,9 @@ impl Store {
     }
 
     fn now_rfc3339_timestamp() -> String {
-        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+        jiff::Timestamp::now()
+            .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string()
     }
 
     fn ensure_manifest_defaults(
@@ -2714,7 +2717,11 @@ impl Store {
             }
             obj.insert(
                 "modified".to_string(),
-                Value::String(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+                Value::String(
+                    jiff::Timestamp::now()
+                        .strftime("%Y-%m-%dT%H:%M:%SZ")
+                        .to_string(),
+                ),
             );
         }
         out
@@ -2840,7 +2847,7 @@ pub fn make_search_object(package: &Value) -> Option<Value> {
             "version": latest,
             "description": description,
             "keywords": keywords,
-            "date": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "date": jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
             "links": { "npm": "" },
             "author": author,
             "publisher": {},

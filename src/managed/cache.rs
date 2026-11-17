@@ -14,7 +14,7 @@ use std::{
 use tokio::sync::RwLock;
 
 fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 /// Drop expired entries and, when the map is still over `max_entries`, evict
@@ -47,9 +47,9 @@ fn evict_to_capacity<K, V>(
 
 /// Parse an RFC3339 timestamp into epoch milliseconds.
 pub fn parse_rfc3339_ms(raw: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(raw)
+    raw.parse::<jiff::Timestamp>()
         .ok()
-        .map(|parsed| parsed.timestamp_millis())
+        .map(|parsed| parsed.as_millisecond())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -439,7 +439,8 @@ mod tests {
     #[tokio::test]
     async fn decision_cache_clamps_ttl_to_expires_at() {
         let cache = DecisionCache::new(100, 3_600_000);
-        let already_past = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        let already_past =
+            (jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1)).to_string();
         cache
             .put(&scope(), &decision(true, Some(already_past), 1))
             .await;
@@ -452,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn decision_cache_expiry_uses_clamped_deadline() {
         let cache = DecisionCache::new(100, 3_600_000);
-        let soon = (chrono::Utc::now() + chrono::Duration::milliseconds(500)).to_rfc3339();
+        let soon = (jiff::Timestamp::now() + jiff::SignedDuration::from_millis(500)).to_string();
         cache.put(&scope(), &decision(true, Some(soon), 1)).await;
         assert!(cache.get(&scope()).await.is_some());
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
@@ -498,7 +499,7 @@ mod tests {
         let response = |minutes: i64| DownloadResolveResponse {
             allowed: true,
             expires_at: Some(
-                (chrono::Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339(),
+                (jiff::Timestamp::now() + jiff::SignedDuration::from_mins(minutes)).to_string(),
             ),
             package: None,
             version: None,
@@ -529,7 +530,9 @@ mod tests {
         let cache = DownloadCache::new(100, 3_600_000);
         let response = DownloadResolveResponse {
             allowed: true,
-            expires_at: Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339()),
+            expires_at: Some(
+                (jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1)).to_string(),
+            ),
             package: None,
             version: None,
             download_url: Some("https://example.com/file.tgz".to_string()),

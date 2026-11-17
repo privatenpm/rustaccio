@@ -687,7 +687,7 @@ fn observe_packument_hit(
             package: package.to_string(),
             bytes,
             not_modified,
-            at: chrono::Utc::now(),
+            at: jiff::Timestamp::now(),
         });
 }
 
