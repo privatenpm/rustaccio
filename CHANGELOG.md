@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Pin the Debian 13 distroless runtime to an updated multi-platform digest containing zlib1g `1:1.3.dfsg+really1.3.1-1+deb13u1`, fixing CVE-2026-76844 and CVE-2026-85091 in the container's OS packages.
+- Stop compiling aws-sdk-s3's legacy HTTPS client (hyper 0.14, h2 0.3, rustls 0.21, rustls-webpki 0.101). It was never used, because both S3 clients install the rustls-ring connector explicitly, but it carried every open RustSec advisory in `Cargo.lock`; `cargo audit` now reports no vulnerabilities.
+- Bound the managed decision cache under a flood of distinct bearer tokens. It pruned only every 30 seconds and never pruned its credential-version map, so 300k unique invalid tokens grew memory by about 350 MB; the same flood now adds about 24 MB.
+
+### Changed
+
+- Update dependencies to their latest compatible releases, the Rust builder image to 1.100.0, the Dockerfile frontend to 1.29.0 and the PostgreSQL test image to 18.7.
+- Read environment variables directly instead of through the `config` crate, which drops it and its YAML parser. Variable names are now matched exactly as documented (upper case); lower-case spellings such as `port` were previously accepted by accident and are no longer read.
+- Evict managed download and metadata cache entries in batches. A full 10k-entry download cache inserts in about 1.1 µs instead of 45 µs, and a mixed 20k-insert/300k-hit workload finishes in about 0.27 s instead of 1.3 s.
+- README: document every build feature, the master `edge` image tags, the publishing prerequisite in the Quick Start, `RUSTACCIO_STRICT_REVISION_CHECK` and the managed modules; fix the library embedding examples, which no longer compiled.
 
 ## [0.14.1] - 2026-10-29
 

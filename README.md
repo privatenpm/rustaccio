@@ -4,11 +4,15 @@
 
 A Rust/Tokio/Axum npm registry proxy inspired by Verdaccio core behavior.
 
+Rustaccio's first job is to serve as [PrivateNPM](https://privatenpm.com)'s npm edge registry, through the [managed data-plane bridge](#managed-data-plane-bridge-control-plane-managed). It also runs on its own as a self-hosted registry and caching proxy with local or S3 storage and no external services; that is the mode the Quick Start below sets up.
+
 ## Compatibility Policy
 
 Rustaccio prioritizes npm client compatibility for common Verdaccio workflows (install, publish, dist-tags, auth, and uplink proxying). It does not guarantee byte-for-byte parity with Verdaccio internals or edge-case behavior; known differences and current limits are documented in [Verdaccio Differences and Limits](#verdaccio-differences-and-limits).
 
 ## Quick Start
+
+Prerequisites: a recent stable Rust toolchain (the container image builds with Rust 1.100) and, for the npm steps, Node.js with npm.
 
 1. Copy the example config:
 
@@ -27,6 +31,10 @@ cargo run -- --config ./config.yml
 ```bash
 npm config set registry http://127.0.0.1:4873/
 ```
+
+`npm install` now resolves through Rustaccio, which caches packages from npmjs under `.rustaccio-data`.
+
+Publishing needs an identity. The example config allows `publish` only for `$authenticated` users, and with the default `auth.backend: none` any request that carries a token is rejected, so npm cannot publish until you connect a token service (see [Authentication](#authentication) and [`docs/contracts/auth-request-v1.md`](docs/contracts/auth-request-v1.md)) or embed Rustaccio with your own [`AuthHook`](#custom-authhook-implementation).
 
 ## Authentication
 
@@ -205,13 +213,18 @@ Environment variables:
 
 Build features:
 
-- `s3` feature enables native S3 tarball backend support (disabled by default for a leaner production binary).
-- Enable with `--features s3` when you need S3 tarball storage.
+No feature is enabled by default, which keeps the plain `cargo build` binary lean. Enable what you need with `--features`:
+
+- `s3`: S3 tarball storage and S3 state coordination (the container image builds with this feature)
+- `redis`: Redis rate limiting and state coordination
+- `postgres`: PostgreSQL quotas and state coordination
+- `otel`: OTLP trace export
 
 ## CI and Releases
 
 - Rust CI is in `.github/workflows/ci.yml` and runs `fmt`, `check`, `clippy -D warnings`, tests (`all-features` and `no-default-features`), and docs with `-D warnings`.
-- Container publish is in `.github/workflows/docker-publish.yml` and pushes multi-arch images to `ghcr.io/<owner>/<repo>` on version tags (`vX.Y.Z`).
+- Container publish is in `.github/workflows/docker-publish.yml` and pushes multi-arch (amd64/arm64) images to `ghcr.io/<owner>/<repo>`. Every push to `master` publishes `edge` and `sha-<short>` tags with the `release` profile; version tags (`vX.Y.Z`) publish `X.Y.Z`, `X.Y` and `latest` with the `dist` profile.
+- Version tags also create a GitHub Release with a `linux-amd64` binary and the matching `CHANGELOG.md` section.
 - Keep a Changelog format changelog lives in `CHANGELOG.md`.
 
 ## Test
@@ -293,7 +306,6 @@ lefthook run pre-commit
 Configured pre-commit checks:
 
 - `cargo fmt --all -- --check`
-- `cargo check --workspace --all-targets --locked`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-targets --locked --quiet`
 
@@ -329,10 +341,9 @@ fn parse_config_arg() -> Option<PathBuf> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let cfg = if let Some(path) = parse_config_arg() {
-        Config::from_env_with_config_file(path)
-            .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?
+        Config::from_env_with_config_file(path)?
     } else {
-        Config::from_env()
+        Config::from_env()?
     };
 
     runtime::run_standalone(cfg).await?;
@@ -389,7 +400,7 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cfg = rustaccio::config::Config::from_env();
+    let mut cfg = rustaccio::config::Config::from_env()?;
 
     // Router::nest("/registry", ...) strips the prefix before dispatch.
     // Keep url_prefix as "/" in this mode.
@@ -471,7 +482,7 @@ Rustaccio targets Verdaccio-compatible npm client behavior for core flows, but i
 - ACL matching is a parity subset: rule matching supports common wildcard patterns, but not full Verdaccio/micromatch pattern semantics.
 - Package routes only consult an explicitly configured package-rule `proxy` uplink; they do not implicitly fall back to `default` or every configured uplink.
 - Authorization parsing currently accepts `Bearer <token>` only.
-- `:revision` route segments are accepted for Verdaccio-compatible route shapes, but revision values are not currently used for optimistic-concurrency checks.
+- `:revision` route segments are accepted for Verdaccio-compatible route shapes; they are only checked for optimistic concurrency when `RUSTACCIO_STRICT_REVISION_CHECK` is enabled (the default in managed mode).
 - There is no local user store: `npm login`/`npm adduser`, npm token management, password changes, and web-login session flows are not supported. Identity comes only from an external HTTP auth backend verifying pre-issued bearer tokens.
 - Search (`/-/v1/search`) currently uses `text`, `size`, and `from`; score tuning params are ignored, and `total` reflects returned page size.
 - YAML `listen` can be configured as a list for config compatibility, but the server currently binds a single effective socket address.
@@ -492,6 +503,10 @@ Rustaccio targets Verdaccio-compatible npm client behavior for core flows, but i
 - `src/upstream.rs`: npm uplink proxy client for package/search/tarball
 - `src/app.rs`: app state + router construction
 - `src/web_ui.rs`: built-in Verdaccio-style web UI shell/assets and SPA route handling
+- `src/runtime.rs`: config loading, backend wiring and server startup shared by the binary and embedders
+- `src/managed/`: managed data-plane bridge to the control plane (authorization, publish, downloads, caches, usage events)
+- `src/state_coordination/`: optional cross-instance write locks (`redis`, `postgres`, `s3`)
+- `src/events.rs`: best-effort registry event sink
 
 ## Plugin Config (YAML)
 
